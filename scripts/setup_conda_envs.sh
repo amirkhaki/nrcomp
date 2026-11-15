@@ -22,8 +22,19 @@ pip_install_safe() {
 
     echo "[+] Installing ${packages[*]} into ${env_name}..."
 
-    # Attempt 1: Kargadan PyPI mirror with 120s timeout
-    echo "  -> Trying Kargadan PyPI proxy (timeout 120s)..."
+    # Attempt 1: Tsinghua TUNA PyPI mirror (ultra-stable and high bandwidth)
+    echo "  -> Trying Tsinghua TUNA PyPI mirror (timeout 120s)..."
+    if conda run -n "${env_name}" pip install \
+        --default-timeout 120 \
+        --retries 3 \
+        --index-url "https://pypi.tuna.tsinghua.edu.cn/simple/" \
+        --trusted-host "pypi.tuna.tsinghua.edu.cn" \
+        "${packages[@]}"; then
+        return 0
+    fi
+
+    # Attempt 2: Kargadan PyPI proxy
+    echo "  -> TUNA failed. Retrying with Kargadan PyPI proxy..."
     if conda run -n "${env_name}" pip install \
         --default-timeout 120 \
         --retries 3 \
@@ -33,8 +44,8 @@ pip_install_safe() {
         return 0
     fi
 
-    # Attempt 2: Runflare mirror fallback
-    echo "  -> Kargadan timed out. Retrying with Runflare PyPI mirror..."
+    # Attempt 3: Runflare mirror fallback
+    echo "  -> Kargadan failed. Retrying with Runflare PyPI mirror..."
     if conda run -n "${env_name}" pip install \
         --default-timeout 120 \
         --retries 3 \
@@ -44,7 +55,7 @@ pip_install_safe() {
         return 0
     fi
 
-    # Attempt 3: Standard pip fallback
+    # Attempt 4: Standard pip fallback
     echo "  -> Mirror fallback: Attempting standard pip install..."
     conda run -n "${env_name}" pip install --default-timeout 120 "${packages[@]}"
 }
