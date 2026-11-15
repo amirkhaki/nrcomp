@@ -188,7 +188,7 @@ class ELICWrapper:
                 )
             else:
                 support_slices = torch.concat(
-                    [support_slices, y_hat_slices[slice_index - 1]], dim=1
+                    [y_hat_slices[0], y_hat_slices[slice_index - 1]], dim=1
                 )
                 support_slices_ch = net.cc_transforms[slice_index - 1](support_slices)
                 support_slices_ch_mean, support_slices_ch_scale = support_slices_ch.chunk(
@@ -200,16 +200,16 @@ class ELICWrapper:
                 if slice_index == 0
                 else torch.concat(
                     [
-                        latent_means,
-                        latent_scales,
                         support_slices_ch_mean,
                         support_slices_ch_scale,
+                        latent_means,
+                        latent_scales,
                     ],
                     dim=1,
                 )
             )
 
-            means_anchor, scales_anchor = net.ParamAggregation_anchor[slice_index](
+            means_anchor, scales_anchor = net.ParamAggregation[slice_index](
                 torch.concat([ctx_params_anchor_split[slice_index], support], dim=1)
             ).chunk(2, 1)
 
