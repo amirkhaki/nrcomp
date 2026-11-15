@@ -16,7 +16,11 @@ setup-envs:
 	bash scripts/setup_envs.sh
 
 download-datasets:
-	bash scripts/download_datasets.sh
+	@if command -v conda >/dev/null && conda info --envs | grep -q "nrcomp-main"; then \
+		conda run -n nrcomp-main python scripts/download_datasets.py --data-root data/raw; \
+	else \
+		bash scripts/download_datasets.sh; \
+	fi
 
 download-weights:
 	@if command -v conda >/dev/null && conda info --envs | grep -q "nrcomp-codec"; then \
