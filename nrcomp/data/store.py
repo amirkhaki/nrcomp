@@ -7,7 +7,7 @@ and ensures sufficient free disk space is available before starting generation.
 import os
 import shutil
 from pathlib import Path
-from typing import Dict, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union
 
 
 def check_disk_space(

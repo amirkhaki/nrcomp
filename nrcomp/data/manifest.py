@@ -173,6 +173,27 @@ class ManifestManager:
                 return
         self.rows.append(row_dict)
 
+    def add_row(self, row_dict: Dict[str, Any]):
+        """Alias for add_or_update_row."""
+        self.add_or_update_row(row_dict)
+
+    def update_row(self, dataset: str, image_id: str, lambda_idx: int, row_dict: Dict[str, Any]):
+        """Alias for add_or_update_row."""
+        self.add_or_update_row(row_dict)
+
+    def exists(self, dataset: str, image_id: str, lambda_idx: int) -> bool:
+        """Check if (dataset, image_id, lambda_idx) is already recorded in manifest."""
+        key = (dataset, str(image_id), int(lambda_idx))
+        return key in self.get_existing_keys()
+
+    def get_all_rows(self) -> List[Dict[str, Any]]:
+        """Return all rows in the manifest."""
+        return self.rows
+
+    def flush(self):
+        """Alias for save."""
+        self.save()
+
     def get_existing_keys(self) -> set:
         """Return set of (dataset, image_id, lambda_idx) already in manifest."""
         keys = set()
@@ -182,3 +203,6 @@ class ManifestManager:
 
     def __len__(self) -> int:
         return len(self.rows)
+
+
+ParquetManifest = ManifestManager

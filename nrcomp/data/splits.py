@@ -86,3 +86,26 @@ def load_koniq_split_csv(input_path: Path) -> Dict[str, str]:
         for row in reader:
             split_map[row["image_id"]] = row["split"]
     return split_map
+
+
+def create_or_load_koniq_splits(
+    koniq_scores_csv: Path, output_split_csv: Path, seed: int = 0
+) -> Dict[str, str]:
+    """Create or load KonIQ stratified split."""
+    output_split_csv = Path(output_split_csv)
+    if output_split_csv.exists():
+        return load_koniq_split_csv(output_split_csv)
+
+    items = []
+    mos_map = {}
+    with open(koniq_scores_csv, "r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            img_id = row.get("image_name", row.get("image_id", ""))
+            mos_val = float(row.get("MOS", row.get("mos", row.get("score", 0.0))))
+            items.append((img_id, mos_val))
+            mos_map[img_id] = mos_val
+
+    split_map = create_koniq_stratified_split(items, seed=seed)
+    save_koniq_split_csv(split_map, mos_map, output_split_csv)
+    return split_map
