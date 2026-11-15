@@ -97,29 +97,45 @@ def download_checkpoint(gdrive_id: str, dest_path: Path):
         subprocess.run(cmd, check=True)
 
 
-def update_entropy_model(raw_path: Path, updated_dir: Path, python_exec: str):
-    """Run updata.py from the ELIC submodule to prepare CDFs."""
-    submodule_dir = Path(__file__).resolve().parent.parent / "third_party" / "ELiC-ReImplemetation"
-    updata_script = submodule_dir / "updata.py"
-    if not updata_script.exists():
-        raise FileNotFoundError(f"updata.py not found at {updata_script}. Ensure git submodule is initialized.")
-
+def update_entropy_model(raw_path: Path, updated_dir: Path):
+    """Update entropy model CDF parameters (replaces updata.py with PyTorch 2.6 compatibility)."""
     updated_dir.mkdir(parents=True, exist_ok=True)
-    updated_name = raw_path.stem + "_updated"
-    print(f"Updating entropy model for {raw_path.name} -> {updated_name}...")
 
-    cmd = [
-        python_exec,
-        str(updata_script),
-        str(raw_path),
-        "-n", updated_name,
-        "-d", str(updated_dir),
-    ]
-    # Set PYTHONPATH to include submodule directory for Network import
-    env = os.environ.copy()
-    current_pythonpath = env.get("PYTHONPATH", "")
-    env["PYTHONPATH"] = f"{submodule_dir}:{current_pythonpath}"
-    subprocess.run(cmd, env=env, check=True)
+    # elic_lambda_0.45.pth.tar -> elic_lambda_0.45_updated.pth.tar
+    updated_filename = raw_path.name.replace(".pth.tar", "_updated.pth.tar")
+    if updated_filename == raw_path.name:
+        updated_filename = raw_path.stem + "_updated.pth.tar"
+    dest_path = updated_dir / updated_filename
+
+    print(f"Updating entropy model: {raw_path.name} -> {updated_filename}...")
+
+    # Add submodule to sys.path
+    submodule_dir = Path(__file__).resolve().parent.parent / "third_party" / "ELiC-ReImplemetation"
+    if str(submodule_dir) not in sys.path:
+        sys.path.insert(0, str(submodule_dir))
+
+    import torch
+    from Network import TestModel
+
+    try:
+        checkpoint = torch.load(raw_path, map_location="cpu", weights_only=False)
+    except TypeError:
+        checkpoint = torch.load(raw_path, map_location="cpu")
+
+    if "network" in checkpoint:
+        state_dict = checkpoint["network"]
+    elif "state_dict" in checkpoint:
+        state_dict = checkpoint["state_dict"]
+    else:
+        state_dict = checkpoint
+
+    model_cls = TestModel()
+    net = model_cls.from_state_dict(state_dict)
+    net.update(force=True)
+
+    updated_state_dict = net.state_dict()
+    torch.save(updated_state_dict, dest_path)
+    print(f"  [+] Saved updated checkpoint to {dest_path}")
 
 
 def main():
@@ -127,7 +143,6 @@ def main():
     parser.add_argument("--output-dir", type=str, default="weights", help="Base weights directory")
     parser.add_argument("--skip-download", action="store_true", help="Skip downloading, only verify/update")
     parser.add_argument("--skip-update", action="store_true", help="Skip running updata.py")
-    parser.add_argument("--python-exec", type=str, default=sys.executable, help="Python executable for updata.py")
     args = parser.parse_args()
 
     base_dir = Path(args.output_dir)
@@ -169,7 +184,7 @@ def main():
 
         # Update entropy model if not skipped
         if not args.skip_update:
-            update_entropy_model(raw_path, updated_dir, args.python_exec)
+            update_entropy_model(raw_path, updated_dir)
 
     save_checksums(checksums_file, updated_checksums)
     print("\n[SUCCESS] All ELIC checkpoints verified and ready!")

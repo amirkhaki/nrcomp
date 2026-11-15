@@ -59,7 +59,12 @@ class ELICWrapper:
         if not ckpt_path.exists():
             raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
 
-        state_dict = load_state_dict(torch.load(ckpt_path, map_location="cpu"))
+        try:
+            raw_ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        except TypeError:
+            raw_ckpt = torch.load(ckpt_path, map_location="cpu")
+
+        state_dict = load_state_dict(raw_ckpt)
         model_cls = TestModel()
         net = model_cls.from_state_dict(state_dict).eval().to(self.device)
         self.models[lambda_idx] = net
