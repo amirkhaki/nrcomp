@@ -153,12 +153,21 @@ def main():
                         f"Lambda {name}, Image {img_path.name}: Expected channels (320, 192), got ({y_hat.shape[0]}, {z_hat.shape[0]})"
                     )
 
-                # Decode directly from latents and check equality with decompress(bytes)
+                # (a) Latent bit-exactness check: latents from extract_latents match latents from bitstream
+                latent_from_bs = wrapper.extract_latents_from_bitstream(bitstream_bytes, meta)
+                y_hat_bs = latent_from_bs["y_hat"]
+                if torch.equal(y_hat, y_hat_bs):
+                    exact_latents_passed += 1
+                else:
+                    failed_checks.append(
+                        f"Lambda {name}, Image {img_path.name}: y_hat from extract_latents does not match bitstream"
+                    )
+
+                # (b) Decode equality check: decode_from_latents(y_hat) matches decompress(bytes)
                 recon_from_latents = wrapper.decode_from_latents(y_hat, meta)
                 max_diff = np.max(np.abs(recon_np.astype(int) - recon_from_latents.astype(int)))
                 if max_diff == 0:
                     decode_equal_passed += 1
-                    exact_latents_passed += 1
                 else:
                     failed_checks.append(
                         f"Lambda {name}, Image {img_path.name}: Max pixel difference between decompress() and decode_from_latents() was {max_diff}"

@@ -44,6 +44,19 @@ class ELICWrapper:
         if str(submodule_path) not in sys.path:
             sys.path.insert(0, str(submodule_path))
 
+        # Enforce deterministic floating-point precision on CUDA
+        # to prevent rANS entropy coder desynchronization
+        try:
+            import torch
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
+            if hasattr(torch.backends.cuda.matmul, "allow_tf32"):
+                torch.backends.cuda.matmul.allow_tf32 = False
+            if hasattr(torch.backends.cudnn, "allow_tf32"):
+                torch.backends.cudnn.allow_tf32 = False
+        except ImportError:
+            pass
+
     def load_model(self, lambda_idx: int, checkpoint_path: Union[str, Path]):
         """Load and cache an updated ELIC model checkpoint for lambda_idx."""
         import torch
@@ -67,6 +80,17 @@ class ELICWrapper:
         state_dict = load_state_dict(raw_ckpt)
         model_cls = TestModel()
         net = model_cls.from_state_dict(state_dict).eval().to(self.device)
+
+        # Patch net.decompress to use robust latent extraction logic
+        wrapper_extract = self._extract_latents_from_strings
+        def robust_decompress(strings, shape):
+            import time
+            y_hat, _ = wrapper_extract(net, strings, shape)
+            t0 = time.time()
+            x_hat = net.g_s(y_hat).clamp(0.0, 1.0)
+            return {"x_hat": x_hat, "time": {"y_dec": time.time() - t0}}
+        net.decompress = robust_decompress
+
         self.models[lambda_idx] = net
 
     def get_model(self, lambda_idx: int) -> Any:
@@ -132,7 +156,7 @@ class ELICWrapper:
 
     def decompress(self, bitstream_bytes: bytes, meta: Dict[str, Any]) -> Any:
         """Decompress bitstream bytes back to original-resolution uint8 RGB image."""
-        import numpy as np
+        import pickle
         import torch
 
         payload = pickle.loads(bitstream_bytes)
@@ -142,19 +166,34 @@ class ELICWrapper:
 
         net = self.get_model(lambda_idx)
         with torch.no_grad():
-            out_dec = net.decompress(strings, shape)
+            y_hat, _ = self._extract_latents_from_strings(net, strings, shape)
+        return self.decode_from_latents(y_hat, meta)
 
-        x_hat = out_dec["x_hat"]  # (1, 3, Hp, Wp)
+    def extract_latents_from_bitstream(
+        self, bitstream_bytes: bytes, meta: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Extract quantized latents y_hat and z_hat directly from bitstream payload."""
+        import pickle
+        import torch
+
+        payload = pickle.loads(bitstream_bytes)
+        strings = payload["strings"]
+        shape = payload["shape"]
+        lambda_idx = meta["lambda_idx"]
+
+        net = self.get_model(lambda_idx)
+        with torch.no_grad():
+            y_hat, z_hat = self._extract_latents_from_strings(net, strings, shape)
+
         orig_h, orig_w = meta["original_size"]
+        valid_mask = compute_valid_mask(orig_h, orig_w, factor=64, downsample=16)
 
-        # Crop back to original dimensions
-        x_hat = x_hat[:, :, :orig_h, :orig_w].clamp(0.0, 1.0)
-        img_np = (
-            (x_hat.squeeze(0).permute(1, 2, 0).cpu().numpy() * 255.0)
-            .round()
-            .astype(np.uint8)
-        )
-        return img_np
+        return {
+            "y_hat": y_hat.squeeze(0),
+            "z_hat": z_hat.squeeze(0),
+            "valid_mask": torch.tensor(valid_mask, dtype=torch.bool, device=self.device),
+            "meta": meta,
+        }
 
     def _extract_latents_from_strings(
         self, net: Any, strings: list, shape: tuple
