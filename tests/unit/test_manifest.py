@@ -1,8 +1,12 @@
 """Unit tests for Manifest management, dataclass validation, and atomic I/O."""
 
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+# Ensure project root is on sys.path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from nrcomp.data.manifest import (
     ManifestManager,

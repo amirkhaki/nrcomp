@@ -1,6 +1,12 @@
 """Unit tests for geometry, padding arithmetic, and valid mask computation."""
 
+import sys
 import unittest
+from pathlib import Path
+
+# Ensure project root is on sys.path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+
 from nrcomp.codec.geometry import (
     compute_padded_dimensions,
     compute_padding_offsets,

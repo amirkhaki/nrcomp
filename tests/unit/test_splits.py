@@ -1,6 +1,12 @@
 """Unit tests for KonIQ stratified split generation and disjointness."""
 
+import sys
 import unittest
+from pathlib import Path
+
+# Ensure project root is on sys.path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+
 from nrcomp.data.splits import create_koniq_stratified_split
 
 
