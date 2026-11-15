@@ -50,14 +50,35 @@ def collect_dataset_images(
     img_dir = (project_root / img_dir_raw) if not Path(img_dir_raw).is_absolute() else Path(img_dir_raw)
 
     if not img_dir.exists():
-        print(f"[WARN] Image directory not found: {img_dir}")
-        return []
+        # Fallback directory matching (e.g. koniq10k vs koniq-10k, LIVEC vs livec)
+        candidates = [
+            project_root / "data" / "raw" / "koniq10k",
+            project_root / "data" / "raw" / "koniq-10k",
+            project_root / "data" / "raw" / "KonIQ-10k",
+            project_root / "data" / "raw" / "LIVEC",
+            project_root / "data" / "raw" / "livec",
+            project_root / "data" / "raw" / "CLIVE",
+        ]
+        found = False
+        for c in candidates:
+            if c.exists() and (dataset_name.lower() in c.name.lower() or c.name.lower() in dataset_name.lower()):
+                img_dir = c
+                found = True
+                break
+        if not found:
+            print(f"[WARN] Image directory not found: {img_dir}")
+            return []
 
+    print(f"Using image directory for {dataset_name}: {img_dir}")
     valid_extensions = {".png", ".jpg", ".jpeg", ".bmp", ".ppm", ".tif", ".tiff"}
     all_img_paths = sorted([p for p in img_dir.glob("*") if p.suffix.lower() in valid_extensions])
     if not all_img_paths:
         # Check subdirectories (e.g., 1024x768/ or images/)
         all_img_paths = sorted([p for p in img_dir.rglob("*") if p.suffix.lower() in valid_extensions])
+
+    # Filter out hidden files / non-images
+    all_img_paths = [p for p in all_img_paths if not p.name.startswith(".")]
+    print(f"Found {len(all_img_paths)} images for {dataset_name}.")
 
     # Attempt to load split information
     split_info: Dict[str, Tuple[str, float]] = {}
@@ -83,8 +104,14 @@ def collect_dataset_images(
             project_root / "data" / "raw" / "koniq10k_scores_and_distributions.csv",
             project_root / "data" / "raw" / "koniq-10k" / "koniq10k_scores_and_distributions.csv",
         ]
-        # Also search recursively in img_dir and data/raw/
-        for p in list(img_dir.rglob("*.csv")) + list((project_root / "data" / "raw").glob("*.csv")):
+        # Also search recursively in img_dir, data/raw/, and data/raw/meta_info/
+        meta_info_dir = project_root / "data" / "raw" / "meta_info"
+        extra_csvs = (
+            list(img_dir.rglob("*.csv"))
+            + list((project_root / "data" / "raw").glob("*.csv"))
+            + (list(meta_info_dir.rglob("*.csv")) if meta_info_dir.exists() else [])
+        )
+        for p in extra_csvs:
             if p not in scores_csv_candidates:
                 scores_csv_candidates.append(p)
 

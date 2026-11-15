@@ -15,10 +15,10 @@ echo " Working Directory: ${PROJECT_ROOT}"
 echo " Log file: ${LOG_FILE}"
 echo "=========================================================="
 
-# 1. Download datasets if missing
+# 1. Download datasets if missing (using Python downloader with PyIQA)
 echo ""
-echo "=== Step 1: Checking Datasets ==="
-bash scripts/download_datasets.sh || true
+echo "=== Step 1: Checking Datasets (Python Downloader) ==="
+conda run -n nrcomp-main python scripts/download_datasets.py || true
 
 # 2. Stage 2: Pilot Data Generation (100 KonIQ images)
 echo ""

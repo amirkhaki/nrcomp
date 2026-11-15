@@ -1,7 +1,7 @@
 # Stage 2: Pilot Data Generation (100 KonIQ images)
 stage: generate_pilot
 dataset: koniq
-image_dir: data/raw/koniq-10k
+image_dir: data/raw/koniq10k
 weights_dir: weights/updated
 manifest_path: data/manifest_pilot.parquet
 latent_store_dir: data/latents

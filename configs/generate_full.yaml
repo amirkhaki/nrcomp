@@ -2,11 +2,11 @@
 stage: generate_full
 datasets:
   - name: koniq
-    image_dir: data/raw/koniq-10k
+    image_dir: data/raw/koniq10k
     split_csv: data/splits/koniq_split.csv
     store_recons: false
   - name: livec
-    image_dir: data/raw/livec
+    image_dir: data/raw/LIVEC
     store_recons: true
 weights_dir: weights/updated
 manifest_path: data/manifest.parquet
