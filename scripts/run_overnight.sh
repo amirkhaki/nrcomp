@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+set -eo pipefail
+
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${PROJECT_ROOT}"
+mkdir -p reports data/latents data/recons data/splits
+
+LOG_FILE="${PROJECT_ROOT}/reports/overnight.log"
+exec > >(tee -a "${LOG_FILE}") 2>&1
+
+echo "=========================================================="
+echo " Starting Overnight End-to-End Pipeline Run"
+echo " Timestamp: $(date '+%Y-%m-%d %H:%M:%S')"
+echo " Working Directory: ${PROJECT_ROOT}"
+echo " Log file: ${LOG_FILE}"
+echo "=========================================================="
+
+# 1. Download datasets if missing
+echo ""
+echo "=== Step 1: Checking Datasets ==="
+bash scripts/download_datasets.sh || true
+
+# 2. Stage 2: Pilot Data Generation (100 KonIQ images)
+echo ""
+echo "=== Step 2: Running 100-Image Pilot Data Generation (Stage 2) ==="
+echo "Timestamp: $(date '+%Y-%m-%d %H:%M:%S')"
+conda run -n nrcomp-codec python -m nrcomp.generate --config configs/generate_pilot.yaml
+
+# 3. Stage 3: Pilot Quality Metric Labelling
+echo ""
+echo "=== Step 3: Computing Quality Metric Labels for Pilot (Stage 3) ==="
+echo "Timestamp: $(date '+%Y-%m-%d %H:%M:%S')"
+conda run -n nrcomp-main python -m nrcomp.label --config configs/label.yaml --manifest data/manifest_pilot.parquet
+
+# 4. Stage 3: Pilot Diagnostic Gates
+echo ""
+echo "=== Step 4: Generating Stage 3 Pilot Diagnostic Reports ==="
+echo "Timestamp: $(date '+%Y-%m-%d %H:%M:%S')"
+conda run -n nrcomp-main python scripts/label_diagnostics.py --manifest data/manifest_pilot.parquet --output reports/label_diagnostics.md
+conda run -n nrcomp-main python scripts/latent_diagnostics.py --manifest data/manifest_pilot.parquet --output reports/latent_diagnostics.md
+
+echo ""
+echo "----------------------------------------------------------"
+echo " [SUCCESS] Pilot Pipeline Completed Successfully!"
+echo " Reports generated: reports/label_diagnostics.md & reports/latent_diagnostics.md"
+echo "----------------------------------------------------------"
+
+# 5. Stage 2: Full Dataset Data Generation (KonIQ-10k & LiveC)
+echo ""
+echo "=== Step 5: Running Full Dataset Generation (KonIQ-10k & LiveC) ==="
+echo "Timestamp: $(date '+%Y-%m-%d %H:%M:%S')"
+conda run -n nrcomp-codec python -m nrcomp.generate --config configs/generate_full.yaml
+
+# 6. Stage 3: Full Quality Metric Labelling
+echo ""
+echo "=== Step 6: Computing Quality Metric Labels for Full Dataset ==="
+echo "Timestamp: $(date '+%Y-%m-%d %H:%M:%S')"
+conda run -n nrcomp-main python -m nrcomp.label --config configs/label.yaml --manifest data/manifest.parquet
+
+# 7. Stage 3: Full Dataset Diagnostic Reports
+echo ""
+echo "=== Step 7: Generating Stage 3 Full Diagnostic Reports ==="
+echo "Timestamp: $(date '+%Y-%m-%d %H:%M:%S')"
+conda run -n nrcomp-main python scripts/label_diagnostics.py --manifest data/manifest.parquet --output reports/label_diagnostics_full.md
+conda run -n nrcomp-main python scripts/latent_diagnostics.py --manifest data/manifest.parquet --output reports/latent_diagnostics_full.md
+
+echo ""
+echo "=========================================================="
+echo " [ALL COMPLETE] Overnight Pipeline Finished Successfully!"
+echo " Timestamp: $(date '+%Y-%m-%d %H:%M:%S')"
+echo " Final Manifest: data/manifest.parquet"
+echo "=========================================================="

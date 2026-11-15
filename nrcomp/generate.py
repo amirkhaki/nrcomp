@@ -55,6 +55,9 @@ def collect_dataset_images(
 
     valid_extensions = {".png", ".jpg", ".jpeg", ".bmp", ".ppm", ".tif", ".tiff"}
     all_img_paths = sorted([p for p in img_dir.glob("*") if p.suffix.lower() in valid_extensions])
+    if not all_img_paths:
+        # Check subdirectories (e.g., 1024x768/ or images/)
+        all_img_paths = sorted([p for p in img_dir.rglob("*") if p.suffix.lower() in valid_extensions])
 
     # Attempt to load split information
     split_info: Dict[str, Tuple[str, float]] = {}
@@ -78,18 +81,28 @@ def collect_dataset_images(
             img_dir.parent / "koniq-10k" / "koniq10k_scores_and_distributions.csv",
             img_dir / "koniq10k_mos.csv",
             project_root / "data" / "raw" / "koniq10k_scores_and_distributions.csv",
+            project_root / "data" / "raw" / "koniq-10k" / "koniq10k_scores_and_distributions.csv",
         ]
+        # Also search recursively in img_dir and data/raw/
+        for p in list(img_dir.rglob("*.csv")) + list((project_root / "data" / "raw").glob("*.csv")):
+            if p not in scores_csv_candidates:
+                scores_csv_candidates.append(p)
+
         for candidate in scores_csv_candidates:
-            if candidate.exists():
-                out_split_csv = project_root / "data" / "splits" / "koniq_split.csv"
-                create_or_load_koniq_splits(candidate, out_split_csv, seed=0)
-                with open(out_split_csv, "r", newline="") as f:
-                    reader = csv.DictReader(f)
-                    for row in reader:
-                        img_name = row.get("image_name", "")
-                        split_info[img_name] = (row.get("split", "train"), float(row.get("mos", 0.0)))
-                        split_info[Path(img_name).name] = (row.get("split", "train"), float(row.get("mos", 0.0)))
-                break
+            if candidate.exists() and candidate.is_file():
+                try:
+                    out_split_csv = project_root / "data" / "splits" / "koniq_split.csv"
+                    create_or_load_koniq_splits(candidate, out_split_csv, seed=0)
+                    with open(out_split_csv, "r", newline="") as f:
+                        reader = csv.DictReader(f)
+                        for row in reader:
+                            img_name = row.get("image_name", "")
+                            split_info[img_name] = (row.get("split", "train"), float(row.get("orig_mos", row.get("mos", 0.0))))
+                            split_info[Path(img_name).name] = (row.get("split", "train"), float(row.get("orig_mos", row.get("mos", 0.0))))
+                    if split_info:
+                        break
+                except Exception:
+                    pass
 
     records = []
     default_split = "test" if dataset_name == "livec" else "train"
