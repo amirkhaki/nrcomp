@@ -80,16 +80,22 @@ class TestBatching(unittest.TestCase):
         self.assertEqual(mask_batch.shape, (2, 15, 12))
 
         # Check that item1 was properly zero-padded outside (10, 10)
-        self.assertEqual(y_batch[0, 0, 12, 11], 0.0)
-        self.assertFalse(mask_batch[0, 12, 11])
+        val0 = y_batch[0, 0, 12, 11]
+        self.assertEqual(val0.item() if hasattr(val0, "item") else val0, 0.0)
+        m0 = mask_batch[0, 12, 11]
+        self.assertFalse(bool(m0.item() if hasattr(m0, "item") else m0))
 
         # Check that item1 has valid 1.0 inside (10, 10)
-        self.assertEqual(y_batch[0, 0, 5, 5], 1.0)
-        self.assertTrue(mask_batch[0, 5, 5])
+        val1 = y_batch[0, 0, 5, 5]
+        self.assertEqual(val1.item() if hasattr(val1, "item") else val1, 1.0)
+        m1 = mask_batch[0, 5, 5]
+        self.assertTrue(bool(m1.item() if hasattr(m1, "item") else m1))
 
         # Check item2 has 2.0 inside (15, 12)
-        self.assertEqual(y_batch[1, 0, 14, 11], 2.0)
-        self.assertTrue(mask_batch[1, 14, 11])
+        val2 = y_batch[1, 0, 14, 11]
+        self.assertEqual(val2.item() if hasattr(val2, "item") else val2, 2.0)
+        m2 = mask_batch[1, 14, 11]
+        self.assertTrue(bool(m2.item() if hasattr(m2, "item") else m2))
 
 
 if __name__ == "__main__":

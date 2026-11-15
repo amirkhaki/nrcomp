@@ -76,6 +76,13 @@ class MockArray:
     def __setitem__(self, idx: Tuple[int, ...], val: Any):
         self._data[self._flat(idx)] = val
 
+    def __array__(self, dtype: Any = None) -> Any:
+        try:
+            import numpy as np
+            return np.array(self._data, dtype=dtype).reshape(self.shape)
+        except ImportError:
+            return self
+
 
 def collate_latent_samples(batch_items: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Collate batch items into zero-padded batch tensors.
@@ -136,7 +143,7 @@ def collate_latent_samples(batch_items: List[Dict[str, Any]]) -> Dict[str, Any]:
             y = y.detach().cpu().numpy()
         h, w = y.shape[-2], y.shape[-1]
         
-        if has_np and not isinstance(padded_y, MockArray):
+        if has_np and not isinstance(padded_y, MockArray) and not isinstance(y, MockArray):
             padded_y[i, :, :h, :w] = y
         else:
             for c in range(num_channels):
@@ -148,7 +155,7 @@ def collate_latent_samples(batch_items: List[Dict[str, Any]]) -> Dict[str, Any]:
         if mask is not None:
             if has_torch and isinstance(mask, torch.Tensor):
                 mask = mask.detach().cpu().numpy()
-            if has_np and not isinstance(padded_mask, MockArray):
+            if has_np and not isinstance(padded_mask, MockArray) and not isinstance(mask, MockArray):
                 padded_mask[i, :h, :w] = mask
             else:
                 for r in range(h):
@@ -167,7 +174,7 @@ def collate_latent_samples(batch_items: List[Dict[str, Any]]) -> Dict[str, Any]:
             if has_torch and isinstance(z, torch.Tensor):
                 z = z.detach().cpu().numpy()
             zh, zw = z.shape[-2], z.shape[-1]
-            if has_np and not isinstance(padded_z, MockArray):
+            if has_np and not isinstance(padded_z, MockArray) and not isinstance(z, MockArray):
                 padded_z[i, :, :zh, :zw] = z
             else:
                 for c in range(z_channels):
@@ -181,8 +188,8 @@ def collate_latent_samples(batch_items: List[Dict[str, Any]]) -> Dict[str, Any]:
             targets.append(item["target"])
 
     result = {
-        "y_hat": torch.from_numpy(padded_y) if (has_torch and has_np) else padded_y,
-        "valid_mask": torch.from_numpy(padded_mask) if (has_torch and has_np) else padded_mask,
+        "y_hat": torch.from_numpy(padded_y) if (has_torch and has_np and not isinstance(padded_y, MockArray)) else padded_y,
+        "valid_mask": torch.from_numpy(padded_mask) if (has_torch and has_np and not isinstance(padded_mask, MockArray)) else padded_mask,
         "image_ids": image_ids,
         "lambda_indices": torch.tensor(lambda_indices, dtype=torch.long)
         if has_torch
@@ -190,7 +197,7 @@ def collate_latent_samples(batch_items: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
     if has_z:
-        result["z_hat"] = torch.from_numpy(padded_z) if (has_torch and has_np) else padded_z
+        result["z_hat"] = torch.from_numpy(padded_z) if (has_torch and has_np and not isinstance(padded_z, MockArray)) else padded_z
 
     if targets:
         result["targets"] = torch.tensor(targets, dtype=torch.float32) if has_torch else targets
