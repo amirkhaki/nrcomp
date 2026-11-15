@@ -25,6 +25,7 @@ pip_install_safe() {
     # Attempt 1: Tsinghua TUNA PyPI mirror (ultra-stable and high bandwidth)
     echo "  -> Trying Tsinghua TUNA PyPI mirror (timeout 120s)..."
     if conda run -n "${env_name}" pip install \
+        --no-build-isolation \
         --default-timeout 120 \
         --retries 3 \
         --index-url "https://pypi.tuna.tsinghua.edu.cn/simple/" \
@@ -36,6 +37,7 @@ pip_install_safe() {
     # Attempt 2: Kargadan PyPI proxy
     echo "  -> TUNA failed. Retrying with Kargadan PyPI proxy..."
     if conda run -n "${env_name}" pip install \
+        --no-build-isolation \
         --default-timeout 120 \
         --retries 3 \
         --index-url "https://mirror.kargadan.ir/repository/pypi-group/simple/" \
@@ -47,6 +49,7 @@ pip_install_safe() {
     # Attempt 3: Runflare mirror fallback
     echo "  -> Kargadan failed. Retrying with Runflare PyPI mirror..."
     if conda run -n "${env_name}" pip install \
+        --no-build-isolation \
         --default-timeout 120 \
         --retries 3 \
         --index-url "https://mirror-pypi.runflare.com/simple/" \
@@ -57,7 +60,7 @@ pip_install_safe() {
 
     # Attempt 4: Standard pip fallback
     echo "  -> Mirror fallback: Attempting standard pip install..."
-    conda run -n "${env_name}" pip install --default-timeout 120 "${packages[@]}"
+    conda run -n "${env_name}" pip install --no-build-isolation --default-timeout 120 "${packages[@]}"
 }
 
 # ------------------------------------------------------------------
@@ -71,8 +74,20 @@ else
     conda create -n nrcomp-codec python=3.9 -y
 fi
 
-echo "[+] Verifying PyTorch + CUDA and core tools via Conda..."
-conda install -n nrcomp-codec pytorch torchvision pytorch-gpu pyyaml tqdm -y
+echo "[+] Installing PyTorch + CUDA, C++ compiler toolchain (gxx), and pybind11 via Conda..."
+conda install -n nrcomp-codec pytorch torchvision pytorch-gpu pyyaml tqdm gxx_linux-64 gcc_linux-64 pybind11 -y
+
+# Ensure standard g++ / gcc symlinks exist in the conda environment bin directory
+CONDA_BASE="$(conda info --base 2>/dev/null || echo "")"
+if [ -n "${CONDA_BASE}" ] && [ -d "${CONDA_BASE}/envs/nrcomp-codec/bin" ]; then
+    BIN_DIR="${CONDA_BASE}/envs/nrcomp-codec/bin"
+    if [ -f "${BIN_DIR}/x86_64-conda-linux-gnu-g++" ] && [ ! -f "${BIN_DIR}/g++" ]; then
+        ln -sf "${BIN_DIR}/x86_64-conda-linux-gnu-g++" "${BIN_DIR}/g++"
+    fi
+    if [ -f "${BIN_DIR}/x86_64-conda-linux-gnu-gcc" ] && [ ! -f "${BIN_DIR}/gcc" ]; then
+        ln -sf "${BIN_DIR}/x86_64-conda-linux-gnu-gcc" "${BIN_DIR}/gcc"
+    fi
+fi
 
 echo "[+] Installing CompressAI and helper packages via pip..."
 pip_install_safe "nrcomp-codec" compressai==1.1.5 thop ptflops timm gdown
