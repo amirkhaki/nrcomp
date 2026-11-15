@@ -1,0 +1,3 @@
+# SHA256 checksums for ELIC lambda checkpoints
+# Format: <sha256>  <filename>
+# Checksums will be verified and populated by scripts/download_weights.py

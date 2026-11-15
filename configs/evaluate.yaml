@@ -1,0 +1,22 @@
+# Stage 5: Evaluation Configuration
+stage: evaluate
+manifest_path: data/manifest.parquet
+latent_store_dir: data/latents
+blind_checkpoint: reports/checkpoints/blind_a/best_model.pth
+conditioned_checkpoint: reports/checkpoints/conditioned_a/best_model.pth
+config_b_checkpoint: reports/checkpoints/conditioned_b/best_model.pth
+eval_main_report: reports/eval_main.md
+eval_refs_report: reports/eval_refs.md
+
+evaluation:
+  bootstrap_resamples: 1000
+  confidence_level: 0.95
+  logistic_fit_on_val: true
+  experiments:
+    - E1_in_distribution
+    - E2_cross_content
+    - E3_mos_independence
+    - E4_second_teacher
+    - E5_shortcut_baselines
+    - E6_pixel_references
+    - E8_efficiency

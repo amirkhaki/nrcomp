@@ -1,0 +1,35 @@
+# Stage 4: Latent Student Training - Config B (y_hat + z_hat)
+stage: train
+config_name: conditioned_b
+manifest_path: data/manifest.parquet
+latent_store_dir: data/latents
+output_dir: reports/checkpoints/conditioned_b
+history_path: reports/training_conditioned_b_history.csv
+plot_path: reports/training_conditioned_b_curves.png
+
+model:
+  config: B  # y_hat (320) + 4x upsampled z_hat (192)
+  in_channels_y: 320
+  in_channels_z: 192
+  width: 256
+  num_res_blocks: 6
+  lambda_mode: conditioned
+  num_lambdas: 6
+  lambda_embed_dim: 256
+  dropout: 0.1
+
+loss:
+  smooth_l1_beta: 1.0
+  alpha_rank: 0.5
+  rank_margin: 0.0
+
+training:
+  epochs: 60
+  warmup_epochs: 2
+  batch_images: 8
+  lambdas_per_image: 3
+  lr: 0.0003
+  weight_decay: 0.05
+  grad_clip: 1.0
+  precision: bf16
+  seed: 42

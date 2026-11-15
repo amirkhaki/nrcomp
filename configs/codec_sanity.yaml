@@ -1,0 +1,25 @@
+# Stage 1: Codec Sanity Gate Configuration
+stage: codec_sanity
+kodak_dir: data/raw/kodak
+weights_dir: weights/updated
+report_path: reports/codec_sanity.md
+num_images_bit_exact_check: 20
+lambdas:
+  - idx: 0
+    name: "0.004"
+    checkpoint: "elic_lambda_0.004_updated.pth.tar"
+  - idx: 1
+    name: "0.008"
+    checkpoint: "elic_lambda_0.008_updated.pth.tar"
+  - idx: 2
+    name: "0.016"
+    checkpoint: "elic_lambda_0.016_updated.pth.tar"
+  - idx: 3
+    name: "0.032"
+    checkpoint: "elic_lambda_0.032_updated.pth.tar"
+  - idx: 4
+    name: "0.15"
+    checkpoint: "elic_lambda_0.15_updated.pth.tar"
+  - idx: 5
+    name: "0.45"
+    checkpoint: "elic_lambda_0.45_updated.pth.tar"

@@ -1,0 +1,18 @@
+# Stage 2: Full Data Generation (KonIQ-10k and LiveC)
+stage: generate_full
+datasets:
+  - name: koniq
+    image_dir: data/raw/koniq-10k
+    split_csv: data/splits/koniq_split.csv
+    store_recons: false
+  - name: livec
+    image_dir: data/raw/livec
+    store_recons: true
+weights_dir: weights/updated
+manifest_path: data/manifest.parquet
+latent_store_dir: data/latents
+recon_dir: data/recons
+save_z_hat: true
+format: fp16
+seed: 0
+failure_log: reports/failures.csv

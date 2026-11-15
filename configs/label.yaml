@@ -1,0 +1,15 @@
+# Stage 3: Quality Metric Labelling
+stage: label
+manifest_path: data/manifest.parquet
+metrics:
+  - name: haarpsi
+    higher_better: true
+  - name: dists
+    higher_better: false
+  - name: psnr
+    higher_better: true
+batch_size: 16
+num_workers: 4
+device: cuda
+report_diagnostics: reports/label_diagnostics.md
+latent_diagnostics: reports/latent_diagnostics.md

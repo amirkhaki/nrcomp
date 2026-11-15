@@ -1,0 +1,10 @@
+# Codec Environment Dependencies (Stage 2 Generation)
+# Recommended Python version: 3.8 - 3.10
+compressai==1.1.5
+thop
+ptflops
+timm
+torchvision
+pyyaml>=6.0
+tqdm>=4.66.0
+gdown>=4.7.0

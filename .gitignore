@@ -218,3 +218,31 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Project nrcomp specific ignores
+.venv*
+venv*
+.venv-codec/
+.venv-main/
+
+# Data storage (gitignored under project root)
+data/raw/
+data/latents/
+data/recons/
+data/*.parquet
+data/*.parquet.tmp
+data/*.parquet.tmp.*
+
+# Large binary weights (keep checksums and docs)
+weights/*.pth*
+weights/*.tar
+weights/raw/
+weights/updated/
+!weights/CHECKSUMS.txt
+!weights/README.md
+
+# Generated reports & figures
+reports/*.csv
+reports/*.png
+reports/*.parquet
+
