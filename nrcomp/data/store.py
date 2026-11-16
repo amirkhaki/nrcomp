@@ -43,7 +43,7 @@ class LatentStore:
     ) -> Path:
         """Construct deterministic file path for latent tensor."""
         clean_id = Path(image_id).stem
-        ext = ".npz" if self.store_format == "npz" else ".pt"
+        ext = ".pt" if self.store_format == "pt" else ".npz"
         return self.root_dir / dataset / f"lambda_{lambda_idx}" / f"{clean_id}{ext}"
 
     def save_latents(
@@ -55,6 +55,18 @@ class LatentStore:
     ):
         """Save latent arrays/tensors to disk."""
         dest_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if self.store_format == "pt":
+            import torch
+            data_dict = {"y_hat": y_hat.half() if hasattr(y_hat, "half") else y_hat}
+            if z_hat is not None:
+                data_dict["z_hat"] = z_hat.half() if hasattr(z_hat, "half") else z_hat
+            if valid_mask is not None:
+                data_dict["valid_mask"] = valid_mask.bool() if hasattr(valid_mask, "bool") else valid_mask
+            tmp_path = dest_path.with_name(f"{dest_path.stem}.tmp.pt")
+            torch.save(data_dict, tmp_path)
+            os.replace(tmp_path, dest_path)
+            return
 
         # Handle torch tensors if available
         try:
@@ -76,12 +88,17 @@ class LatentStore:
         if valid_mask is not None:
             data_dict["valid_mask"] = np.asarray(valid_mask, dtype=bool)
 
-        tmp_path = dest_path.with_suffix(dest_path.suffix + ".tmp")
-        np.savez_compressed(tmp_path, **data_dict)
+        tmp_path = dest_path.with_name(f"{dest_path.stem}.tmp.npz")
+        with open(tmp_path, "wb") as f:
+            np.savez_compressed(f, **data_dict)
         os.replace(tmp_path, dest_path)
 
     def load_latents(self, latent_path: Path) -> Dict[str, Any]:
         """Load latent arrays from disk."""
+        if latent_path.suffix == ".pt":
+            import torch
+            return torch.load(latent_path, map_location="cpu")
+
         import numpy as np
 
         with np.load(latent_path) as data:
