@@ -41,7 +41,7 @@
   - Mean per-image Spearman(HaarPSI, $1 - \text{DISTS}$): **0.9983** vs $> 0.80$ target (**PASS**).
   - Lambda predictability from pooled latent statistics: **77.00%** vs 16.67% random chance (**PASS**).
 
-### Milestone M3: Full Dataset Generation & Labelling (COMPLETED)
+### Milestone M3: Full Dataset Generation & Labelling Gate (PASSED)
 - Tailored for the 15 GB disk budget (`configs/generate_subset.yaml`):
   - KonIQ-10k: 800 source images $\times 6 = 4,800$ samples (stratified 80/10/10 train/val/test across MOS quintiles).
   - LiveC: 200 source images $\times 6 = 1,200$ samples (cross-content test set).
@@ -49,6 +49,11 @@
 - Data generation (`nrcomp.generate`) completed with **0 failures**.
 - Quality metric labelling (`nrcomp.label`) completed with on-the-fly GPU latent decoding.
 - Complete manifest stored at `data/manifest.parquet` (and mirrored to `data/manifest.csv`).
+- **Full Diagnostic Gate Results (`reports/label_diagnostics_full.md` & `reports/latent_diagnostics_full.md`):**
+  - **Non-monotone HaarPSI share:** **0.0% (0/1000 images)** vs $\le 10.0\%$ target (**PASS**).
+  - **Spearman(HaarPSI, 1 - DISTS) [Overall]:** **0.7235** vs $> 0.70$ target (**PASS**).
+  - **Spearman(HaarPSI, 1 - DISTS) [Mean Per-Image]:** **0.9980** vs $> 0.80$ target (**PASS**).
+  - **Lambda Predictor Accuracy:** **80.00%** vs 16.67% random chance baseline (**PASS**).
 
 ---
 
