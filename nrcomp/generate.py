@@ -131,6 +131,27 @@ def collect_dataset_images(
                 except Exception:
                     pass
 
+    # Subsetting via max_images if specified in dataset config
+    max_images = dataset_cfg.get("max_images")
+    if max_images and len(all_img_paths) > max_images:
+        if split_info:
+            from collections import defaultdict
+            by_split = defaultdict(list)
+            for p in all_img_paths:
+                s, _ = split_info.get(p.name, (default_split, 0.0))
+                by_split[s].append(p)
+
+            selected_paths = []
+            for s in ["train", "val", "test"]:
+                plist = by_split.get(s, [])
+                if plist:
+                    quota = max(1, int(round(len(plist) / len(all_img_paths) * max_images)))
+                    selected_paths.extend(plist[:quota])
+            all_img_paths = selected_paths[:max_images]
+        else:
+            all_img_paths = all_img_paths[:max_images]
+        print(f"Subsetting {dataset_name} to {len(all_img_paths)} images.")
+
     records = []
     default_split = "test" if dataset_name == "livec" else "train"
     for img_path in all_img_paths:
@@ -178,14 +199,40 @@ def main():
     print(f"Total images: {len(all_image_records)}, Shard {args.shard_id}/{args.num_shards}: {len(sharded_records)} images.")
     print(f"Target lambdas: {len(lambdas_cfg)} operating points.")
 
-    # Pre-flight disk space check
-    num_samples = len(sharded_records) * len(lambdas_cfg)
+    # Initialize manifest and import pilot samples if manifest is currently empty
+    manifest = ParquetManifest(manifest_path)
+    if len(manifest) == 0:
+        for pilot_cand in [
+            manifest_path.parent / "manifest_pilot.parquet",
+            manifest_path.parent / "manifest_pilot.csv",
+        ]:
+            if pilot_cand.exists():
+                try:
+                    p_man = ParquetManifest(pilot_cand)
+                    for r in p_man.get_all_rows():
+                        manifest.add_row(r)
+                    manifest.flush()
+                    print(f"Imported {len(manifest)} existing pilot samples from {pilot_cand.name}.")
+                    break
+                except Exception:
+                    pass
+
+    existing_keys = manifest.get_existing_keys()
+    needed_samples = 0
+    for dataset_name, img_path, _, _ in sharded_records:
+        image_id = img_path.name
+        for l_item in lambdas_cfg:
+            lambda_idx = l_item["idx"]
+            if (dataset_name, str(image_id), int(lambda_idx)) not in existing_keys:
+                needed_samples += 1
+
+    # Pre-flight disk space check on ungenerated samples
     has_space, free_bytes, required_bytes = check_disk_space(
-        latent_store_dir, num_samples, bytes_per_sample=2 * 1024 * 1024, safety_margin=1.1
+        latent_store_dir, needed_samples, bytes_per_sample=int(1.8 * 1024 * 1024), safety_margin=1.1
     )
     free_gb = free_bytes / (1024 ** 3)
     req_gb = required_bytes / (1024 ** 3)
-    print(f"Pre-flight disk check: {free_gb:.2f} GB free, estimated required: {req_gb:.2f} GB.")
+    print(f"Pre-flight disk check: {free_gb:.2f} GB free, estimated required for {needed_samples} new samples: {req_gb:.2f} GB.")
     if not has_space:
         print(f"[FATAL] Insufficient disk space on {latent_store_dir}!")
         print(f"Required: {req_gb:.2f} GB (with 1.1x safety margin), Available: {free_gb:.2f} GB.")
@@ -207,7 +254,6 @@ def main():
         wrapper.load_model(idx, ckpt)
 
     latent_store = LatentStore(root_dir=latent_store_dir, store_format=cfg.get("format", "npz"))
-    manifest = ParquetManifest(manifest_path)
 
     completed_count = 0
     skipped_count = 0

@@ -59,11 +59,13 @@ echo " [SUCCESS] Pilot Pipeline Completed Successfully!"
 echo " Reports generated: reports/label_diagnostics.md & reports/latent_diagnostics.md"
 echo "----------------------------------------------------------"
 
-# 5. Stage 2: Full Dataset Data Generation (KonIQ-10k & LiveC)
+# 5. Stage 2: Dataset Data Generation (KonIQ-10k & LiveC)
+# Default is configs/generate_subset.yaml (fits safely within 15GB disk budget)
+GENERATE_CONFIG="${1:-configs/generate_subset.yaml}"
 echo ""
-echo "=== Step 5: Running Full Dataset Generation (KonIQ-10k & LiveC) ==="
+echo "=== Step 5: Running Dataset Generation (${GENERATE_CONFIG}) ==="
 echo "Timestamp: $(date '+%Y-%m-%d %H:%M:%S')"
-conda run --no-capture-output -n nrcomp-codec python -m nrcomp.generate --config configs/generate_full.yaml
+conda run --no-capture-output -n nrcomp-codec python -m nrcomp.generate --config "${GENERATE_CONFIG}"
 
 # 6. Stage 3: Full Quality Metric Labelling
 echo ""

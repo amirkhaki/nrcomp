@@ -1,0 +1,21 @@
+# Stage 2: Balanced Subset Data Generation (15GB Disk Budget)
+# 800 KonIQ images + 200 LiveC images across 6 lambdas = 6,000 total samples (~7.5 GB storage)
+stage: generate_subset
+datasets:
+  - name: koniq
+    image_dir: data/raw/koniq10k
+    split_csv: data/splits/koniq_split.csv
+    max_images: 800
+    store_recons: false
+  - name: livec
+    image_dir: data/raw/LIVEC
+    max_images: 200
+    store_recons: true
+weights_dir: weights/updated
+manifest_path: data/manifest.parquet
+latent_store_dir: data/latents
+recon_dir: data/recons
+save_z_hat: true
+format: fp16
+seed: 0
+failure_log: reports/failures.csv

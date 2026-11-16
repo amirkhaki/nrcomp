@@ -29,6 +29,22 @@ class TestGeneratePipeline(unittest.TestCase):
                 self.assertIn("img_01.png", content)
                 self.assertIn("Test error message", content)
 
+    def test_collect_dataset_images_max_images(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_p = Path(tmp_dir)
+            img_dir = tmp_p / "images"
+            img_dir.mkdir()
+            for i in range(20):
+                (img_dir / f"img_{i:03d}.png").touch()
+
+            d_cfg = {
+                "name": "dummy",
+                "image_dir": str(img_dir),
+                "max_images": 5,
+            }
+            records = collect_dataset_images(d_cfg, tmp_p)
+            self.assertEqual(len(records), 5)
+
 
 if __name__ == "__main__":
     unittest.main()
