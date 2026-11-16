@@ -129,7 +129,7 @@ def main():
                         "padded_size": (row["padded_height"], row["padded_width"]),
                         "lambda_idx": lambda_idx,
                     }
-                    recon_np = wrapper.decode_from_latents(torch.from_numpy(lat_data["y_hat"]), meta)
+                    recon_np = wrapper.decode_from_latents(torch.from_numpy(lat_data["y_hat"]).float(), meta)
                 else:
                     print(f"[WARN] Neither recon nor latent found for {row['image_id']}, skipping.")
                     continue

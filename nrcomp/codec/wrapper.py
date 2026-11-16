@@ -358,7 +358,7 @@ class ELICWrapper:
 
         if y_hat.dim() == 3:
             y_hat = y_hat.unsqueeze(0)
-        y_hat = y_hat.to(self.device)
+        y_hat = y_hat.to(self.device).float()
 
         lambda_idx = meta["lambda_idx"]
         net = self.get_model(lambda_idx)
