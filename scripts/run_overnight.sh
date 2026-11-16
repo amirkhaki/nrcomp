@@ -32,7 +32,7 @@ conda run --no-capture-output -n nrcomp-codec pip install \
 conda run --no-capture-output -n nrcomp-main pip install \
     -i https://pypi.tuna.tsinghua.edu.cn/simple \
     --trusted-host pypi.tuna.tsinghua.edu.cn \
-    piq compressai thop ptflops || true
+    piq "compressai==1.1.5" thop ptflops || true
 
 # 2. Stage 2: Pilot Data Generation (100 KonIQ images)
 echo ""

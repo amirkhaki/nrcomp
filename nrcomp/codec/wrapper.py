@@ -64,6 +64,7 @@ class ELICWrapper:
         import compressai
 
         # Backward compatibility patch: CompressAI >= 1.2 moved GaussianConditional to entropy_models
+        # and removed ste_round from compressai.ops
         import compressai.models.priors
         if not hasattr(compressai.models.priors, "GaussianConditional"):
             try:
@@ -71,6 +72,12 @@ class ELICWrapper:
                 compressai.models.priors.GaussianConditional = compressai.entropy_models.GaussianConditional
             except (ImportError, AttributeError):
                 pass
+
+        import compressai.ops
+        if not hasattr(compressai.ops, "ste_round"):
+            def ste_round(x: torch.Tensor) -> torch.Tensor:
+                return torch.round(x) - x.detach() + x
+            compressai.ops.ste_round = ste_round
 
         from Network import TestModel
 

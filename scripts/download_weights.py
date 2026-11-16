@@ -242,6 +242,12 @@ def update_entropy_model(raw_path: Path, updated_dir: Path, force: bool = False)
         except (ImportError, AttributeError):
             pass
 
+    import compressai.ops
+    if not hasattr(compressai.ops, "ste_round"):
+        def ste_round(x: torch.Tensor) -> torch.Tensor:
+            return torch.round(x) - x.detach() + x
+        compressai.ops.ste_round = ste_round
+
     from Network import TestModel
 
     try:
