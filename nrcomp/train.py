@@ -337,7 +337,12 @@ def main():
 
             optimizer.zero_grad()
 
-            with torch.cuda.amp.autocast(enabled=use_autocast, dtype=autocast_dtype):
+            try:
+                amp_ctx = torch.amp.autocast(device_type=device.type, enabled=use_autocast, dtype=autocast_dtype)
+            except (AttributeError, TypeError):
+                amp_ctx = torch.cuda.amp.autocast(enabled=use_autocast, dtype=autocast_dtype)
+
+            with amp_ctx:
                 preds = model(
                     y_hat=y_hat,
                     valid_mask=valid_mask,
@@ -401,7 +406,12 @@ def main():
                 targets = batch["targets"].to(device, non_blocking=True).float()
                 image_ids = batch["image_ids"]
 
-                with torch.cuda.amp.autocast(enabled=use_autocast, dtype=autocast_dtype):
+                try:
+                    amp_ctx = torch.amp.autocast(device_type=device.type, enabled=use_autocast, dtype=autocast_dtype)
+                except (AttributeError, TypeError):
+                    amp_ctx = torch.cuda.amp.autocast(enabled=use_autocast, dtype=autocast_dtype)
+
+                with amp_ctx:
                     preds = model(
                         y_hat=y_hat,
                         valid_mask=valid_mask,

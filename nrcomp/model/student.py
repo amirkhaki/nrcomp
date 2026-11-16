@@ -6,7 +6,8 @@ Per Milestone M4 specification:
 - Blind mode: No lambda conditioning, Head input width 512.
 - Conditioned mode: Learned lambda embedding added before trunk AND concatenated
   into the MLP head (Head input width 768).
-- Mask protection: Features multiplied by valid_mask after stem and after every ResBlock.
+- Mask protection: Features multiplied by valid_mask at input, after stem,
+  and after every ResBlock.
 - Precision: Trunk runs in autocast (bf16), while pooling, head, and loss math
   are explicitly enforced in float32 to prevent output quantization blurring.
 """
@@ -54,7 +55,7 @@ class LatentStudent(BaseModule):
         num_res_blocks: int = 6,
         lambda_mode: str = "blind",
         num_lambdas: int = 6,
-        lambda_embed_dim: int = 256,
+        lambda_embed_dim: Optional[int] = None,
         dropout: float = 0.1,
     ):
         super().__init__()
@@ -65,7 +66,7 @@ class LatentStudent(BaseModule):
         self.num_res_blocks = num_res_blocks
         self.lambda_mode = lambda_mode.lower()
         self.num_lambdas = num_lambdas
-        self.lambda_embed_dim = lambda_embed_dim
+        self.lambda_embed_dim = lambda_embed_dim if lambda_embed_dim is not None else width
         self.dropout_rate = dropout
 
         # Normalization buffers
@@ -82,6 +83,7 @@ class LatentStudent(BaseModule):
             self.std_z = None
 
         self.lambda_embed = None
+        self.lambda_proj = None
         self.stem_y = None
         self.stem_z = None
         self.fuse_b = None
@@ -101,9 +103,14 @@ class LatentStudent(BaseModule):
 
         # 2. Lambda Embedding (Conditioned mode only)
         if self.lambda_mode == "conditioned":
-            self.lambda_embed = nn.Embedding(num_lambdas, lambda_embed_dim)
+            self.lambda_embed = nn.Embedding(num_lambdas, self.lambda_embed_dim)
+            if self.lambda_embed_dim != width:
+                self.lambda_proj = nn.Linear(self.lambda_embed_dim, width)
+            else:
+                self.lambda_proj = nn.Identity()
         else:
             self.lambda_embed = None
+            self.lambda_proj = None
 
         # 3. Residual Trunk with mask protection
         self.trunk = Trunk(depth=num_res_blocks, width=width)
@@ -113,9 +120,9 @@ class LatentStudent(BaseModule):
         self.attn_pool = MaskedAttentionPool(channels=width)
 
         # 5. MLP Head (enforced in fp32)
-        # In conditioned mode: 512 (pooled) + 256 (lambda_embed) = 768
-        # In blind mode: 512 (pooled)
-        head_in_dim = (width * 2) + (lambda_embed_dim if self.lambda_mode == "conditioned" else 0)
+        # In conditioned mode: 2 * width (pooled) + lambda_embed_dim
+        # In blind mode: 2 * width (pooled)
+        head_in_dim = (width * 2) + (self.lambda_embed_dim if self.lambda_mode == "conditioned" else 0)
         self.head = nn.Sequential(
             nn.Linear(head_in_dim, width),
             nn.GELU(),
@@ -171,15 +178,29 @@ class LatentStudent(BaseModule):
             if m_f32.ndim == 3:
                 m_f32 = m_f32.unsqueeze(1)
 
+        # 0. Zero out invalid cells in input to guarantee strict mask invariance
+        if m_f32 is not None:
+            y_hat = y_hat * m_f32
+
         # 1. Input Normalization
         y_norm = (y_hat.float() - self.mean_y) / self.std_y
+        if m_f32 is not None:
+            y_norm = y_norm * m_f32
+
         feat = self.stem_y(y_norm, mask=m_f32)
 
         # Config B Fusion
         if self.config == "B":
             if z_hat is None:
                 raise ValueError("Config B requires z_hat input tensor.")
-            z_norm = (z_hat.float() - self.mean_z) / self.std_z
+            if m_f32 is not None:
+                # Downsample mask for z_hat
+                z_mask = F.interpolate(m_f32, size=(z_hat.size(-2), z_hat.size(-1)), mode="nearest")
+                z_hat = z_hat * z_mask
+                z_norm = ((z_hat.float() - self.mean_z) / self.std_z) * z_mask
+            else:
+                z_norm = (z_hat.float() - self.mean_z) / self.std_z
+
             # Stem Z (downsampled 4x relative to y_hat)
             feat_z = self.stem_z(z_norm)
             # Upsample 4x (nearest) to match y_hat grid
@@ -196,9 +217,10 @@ class LatentStudent(BaseModule):
         if self.lambda_mode == "conditioned":
             if lambda_idx is None:
                 raise ValueError("Conditioned mode requires lambda_idx tensor.")
-            e_lambda = self.lambda_embed(lambda_idx)  # (B, 256)
+            e_lambda = self.lambda_embed(lambda_idx)  # (B, lambda_embed_dim)
+            e_trunk = self.lambda_proj(e_lambda)     # (B, width)
             # Broadcast add into trunk feature map
-            feat = feat + e_lambda.unsqueeze(-1).unsqueeze(-1)
+            feat = feat + e_trunk.unsqueeze(-1).unsqueeze(-1)
             if m_f32 is not None:
                 feat = feat * m_f32
 
@@ -212,12 +234,18 @@ class LatentStudent(BaseModule):
 
         # 5. Head input
         if self.lambda_mode == "conditioned" and e_lambda is not None:
-            head_in = torch.cat([pooled, e_lambda.float()], dim=1)  # (B, 768)
+            head_in = torch.cat([pooled, e_lambda.float()], dim=1)
         else:
-            head_in = pooled  # (B, 512)
+            head_in = pooled
 
         # 6. MLP Head explicitly in fp32 outside autocast
-        with torch.cuda.amp.autocast(enabled=False):
+        try:
+            device_type = head_in.device.type
+            amp_ctx = torch.amp.autocast(device_type=device_type, enabled=False)
+        except (AttributeError, TypeError):
+            amp_ctx = torch.cuda.amp.autocast(enabled=False)
+
+        with amp_ctx:
             pred = self.head(head_in.float()).squeeze(-1)  # (B,)
 
         return pred
