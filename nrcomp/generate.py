@@ -131,6 +131,8 @@ def collect_dataset_images(
                 except Exception:
                     pass
 
+    default_split = "test" if dataset_name == "livec" else "train"
+
     # Subsetting via max_images if specified in dataset config
     max_images = dataset_cfg.get("max_images")
     if max_images and len(all_img_paths) > max_images:
@@ -153,7 +155,6 @@ def collect_dataset_images(
         print(f"Subsetting {dataset_name} to {len(all_img_paths)} images.")
 
     records = []
-    default_split = "test" if dataset_name == "livec" else "train"
     for img_path in all_img_paths:
         split, mos = split_info.get(img_path.name, (default_split, 0.0))
         records.append((dataset_name, img_path, split, mos))

@@ -45,6 +45,30 @@ class TestGeneratePipeline(unittest.TestCase):
             records = collect_dataset_images(d_cfg, tmp_p)
             self.assertEqual(len(records), 5)
 
+    def test_collect_dataset_images_with_splits(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_p = Path(tmp_dir)
+            img_dir = tmp_p / "images"
+            img_dir.mkdir()
+            split_csv = tmp_p / "splits.csv"
+            with open(split_csv, "w") as f:
+                f.write("image_name,split,mos\n")
+                for i in range(30):
+                    (img_dir / f"img_{i:03d}.png").touch()
+                    sp = "train" if i < 20 else ("val" if i < 25 else "test")
+                    f.write(f"img_{i:03d}.png,{sp},{float(i)}\n")
+
+            d_cfg = {
+                "name": "koniq",
+                "image_dir": str(img_dir),
+                "split_csv": str(split_csv),
+                "max_images": 10,
+            }
+            records = collect_dataset_images(d_cfg, tmp_p)
+            self.assertEqual(len(records), 10)
+            splits_present = set(r[2] for r in records)
+            self.assertIn("train", splits_present)
+
 
 if __name__ == "__main__":
     unittest.main()
