@@ -118,16 +118,16 @@ def main():
             manifest.update_row(row["dataset"], row["image_id"], row["lambda_idx"], row)
             updated_count += 1
 
-            if (idx + 1) % 20 == 0:
+            if (idx + 1) % 20 == 0 or (idx + 1) == len(rows_to_label):
                 manifest.flush()
-                print(f"Labelling progress: {idx + 1}/{len(rows_to_label)} rows processed.")
+                print(f"Labelling progress: {idx + 1}/{len(rows_to_label)} rows processed.", flush=True)
 
         except Exception as e:
-            print(f"[!] Error labelling {row['image_id']} lambda={row['lambda_idx']}: {e}")
+            print(f"[!] Error labelling {row['image_id']} lambda={row['lambda_idx']}: {e}", flush=True)
 
     # Final flush
     manifest.flush()
-    print(f"\nLabelling complete! Successfully updated {updated_count} rows in {manifest_path}.")
+    print(f"\nLabelling complete! Successfully updated {updated_count} rows in {manifest_path}.", flush=True)
 
 
 if __name__ == "__main__":

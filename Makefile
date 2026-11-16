@@ -17,21 +17,21 @@ setup-envs:
 
 download-datasets:
 	@if command -v conda >/dev/null && conda info --envs | grep -q "nrcomp-main"; then \
-		conda run -n nrcomp-main python scripts/download_datasets.py --data-root data/raw; \
+		conda run --no-capture-output -n nrcomp-main python scripts/download_datasets.py --data-root data/raw; \
 	else \
 		bash scripts/download_datasets.sh; \
 	fi
 
 download-weights:
 	@if command -v conda >/dev/null && conda info --envs | grep -q "nrcomp-codec"; then \
-		conda run -n nrcomp-codec python scripts/download_weights.py --output-dir weights/; \
+		conda run --no-capture-output -n nrcomp-codec python scripts/download_weights.py --output-dir weights/; \
 	else \
 		.venv-codec/bin/python scripts/download_weights.py --output-dir weights/; \
 	fi
 
 test-unit:
 	@if command -v conda >/dev/null && conda info --envs | grep -q "nrcomp-main"; then \
-		conda run -n nrcomp-main pytest tests/unit -v; \
+		conda run --no-capture-output -n nrcomp-main pytest tests/unit -v; \
 	elif [ -d ".venv-main" ]; then \
 		.venv-main/bin/pytest tests/unit -v; \
 	else \
@@ -40,7 +40,7 @@ test-unit:
 
 codec-sanity:
 	@if command -v conda >/dev/null && conda info --envs | grep -q "nrcomp-codec"; then \
-		conda run -n nrcomp-codec python scripts/codec_sanity.py --config configs/codec_sanity.yaml; \
+		conda run --no-capture-output -n nrcomp-codec python scripts/codec_sanity.py --config configs/codec_sanity.yaml; \
 	else \
 		.venv-codec/bin/python scripts/codec_sanity.py --config configs/codec_sanity.yaml; \
 	fi

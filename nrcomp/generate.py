@@ -303,10 +303,14 @@ def main():
                 log_failure(failure_log_path, dataset_name, image_id, lambda_idx, str(e))
                 failed_count += 1
 
-        # Periodic flush to disk every 10 images
-        if (img_idx + 1) % 10 == 0:
+        # Periodic flush to disk every 5 images
+        if (img_idx + 1) % 5 == 0 or (img_idx + 1) == len(sharded_records):
             manifest.flush()
-            print(f"Progress: {img_idx + 1}/{len(sharded_records)} images processed ({completed_count} generated, {skipped_count} skipped, {failed_count} failures).")
+            print(
+                f"Progress: {img_idx + 1}/{len(sharded_records)} images processed "
+                f"({completed_count} generated, {skipped_count} skipped, {failed_count} failures).",
+                flush=True,
+            )
 
     # Final flush
     manifest.flush()
