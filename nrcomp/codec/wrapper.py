@@ -62,6 +62,16 @@ class ELICWrapper:
         import torch
         from compressai.zoo import load_state_dict
         import compressai
+
+        # Backward compatibility patch: CompressAI >= 1.2 moved GaussianConditional to entropy_models
+        import compressai.models.priors
+        if not hasattr(compressai.models.priors, "GaussianConditional"):
+            try:
+                import compressai.entropy_models
+                compressai.models.priors.GaussianConditional = compressai.entropy_models.GaussianConditional
+            except (ImportError, AttributeError):
+                pass
+
         from Network import TestModel
 
         compressai.set_entropy_coder(self.entropy_coder)

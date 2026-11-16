@@ -233,6 +233,15 @@ def update_entropy_model(raw_path: Path, updated_dir: Path, force: bool = False)
         sys.path.insert(0, str(submodule_dir))
 
     import torch
+    import compressai
+    import compressai.models.priors
+    if not hasattr(compressai.models.priors, "GaussianConditional"):
+        try:
+            import compressai.entropy_models
+            compressai.models.priors.GaussianConditional = compressai.entropy_models.GaussianConditional
+        except (ImportError, AttributeError):
+            pass
+
     from Network import TestModel
 
     try:
