@@ -91,12 +91,12 @@ class TestStudentTorch(unittest.TestCase):
         mask[:, 12:, :] = False
 
         # Zero out padding cells in clean input
-        y_clean = y_clean * mask.unsqueeze(1).float()
+        m4d = mask.unsqueeze(1).float()
+        y_clean = y_clean * m4d
 
-        # Create noisy input with huge garbage in invalid padding cells
-        y_noisy = y_clean.clone()
-        y_noisy[:, :, 12:] = torch.randn_like(y_noisy[:, :, 12:]) * 1000.0
-        y_noisy[:, 12:, :] = torch.randn_like(y_noisy[:, 12:, :]) * 1000.0
+        # Create noisy input with huge garbage strictly in invalid padding cells
+        garbage = torch.randn_like(y_clean) * 1000.0
+        y_noisy = torch.where(mask.unsqueeze(1), y_clean, garbage)
 
         with torch.no_grad():
             out_clean = model(y_clean, valid_mask=mask)
