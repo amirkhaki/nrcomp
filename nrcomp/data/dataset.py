@@ -1,13 +1,110 @@
 """Dataset and batching logic for latent training.
 
-Implements SourceImageBatchSampler (B source images, k lambdas per image)
-and collate function that handles zero-padding and valid_mask aggregation.
+Implements LatentDataset, SourceImageBatchSampler (B source images, k lambdas per image),
+collate function that handles zero-padding and valid_mask aggregation,
+and training normalization statistics computation over valid cells.
 Strictly no spatial augmentation on latents.
 """
 
+import math
 import random
 from collections import defaultdict
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from pathlib import Path
+from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
+
+try:
+    import torch
+    from torch.utils.data import Dataset as TorchDataset
+    HAS_TORCH = True
+except ImportError:
+    torch = None
+    HAS_TORCH = False
+
+    class TorchDataset:  # type: ignore
+        pass
+
+
+def seed_worker(worker_id: int):
+    """Seed dataloader worker deterministically."""
+    worker_seed = (torch.initial_seed() % 2**32) if HAS_TORCH else 42
+    random.seed(worker_seed)
+    try:
+        import numpy as np
+        np.random.seed(worker_seed)
+    except ImportError:
+        pass
+
+
+class LatentDataset(TorchDataset):
+    """Dataset loading codec latents and targets from manifest records."""
+
+    def __init__(
+        self,
+        rows: List[Dict[str, Any]],
+        latent_store: Any,
+        split: Optional[str] = None,
+        config: str = "A",
+        target_metric: str = "haarpsi",
+    ):
+        self.latent_store = latent_store
+        self.split = split
+        self.config = config.upper()
+        self.target_metric = target_metric
+
+        # Filter rows by split and target validity
+        self.samples = []
+        for r in rows:
+            if split is not None and r.get("split") != split:
+                continue
+
+            target_val = r.get(target_metric)
+            if target_val is None:
+                continue
+            try:
+                target_f = float(target_val)
+                if math.isnan(target_f) or math.isinf(target_f):
+                    continue
+            except (ValueError, TypeError):
+                continue
+
+            self.samples.append(r)
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        row = self.samples[idx]
+        latent_path = Path(row["latent_path"])
+        
+        # Load from latent store
+        latents = self.latent_store.load_latents(latent_path)
+        y_hat = latents["y_hat"]
+        valid_mask = latents.get("valid_mask")
+
+        # Load z_hat only if Config B to save bandwidth and memory
+        z_hat = None
+        if self.config == "B":
+            z_hat = latents.get("z_hat")
+
+        item = {
+            "y_hat": y_hat,
+            "valid_mask": valid_mask,
+            "image_id": str(row["image_id"]),
+            "lambda_idx": int(row["lambda_idx"]),
+            "target": float(row[self.target_metric]),
+        }
+
+        if z_hat is not None:
+            item["z_hat"] = z_hat
+
+        return item
+
+    def get_image_to_indices(self) -> Dict[str, List[int]]:
+        """Map each source image_id to its indices in this dataset."""
+        mapping: Dict[str, List[int]] = defaultdict(list)
+        for idx, row in enumerate(self.samples):
+            mapping[str(row["image_id"])].append(idx)
+        return mapping
 
 
 class SourceImageBatchSampler:
@@ -142,7 +239,7 @@ def collate_latent_samples(batch_items: List[Dict[str, Any]]) -> Dict[str, Any]:
         if has_torch and isinstance(y, torch.Tensor):
             y = y.detach().cpu().numpy()
         h, w = y.shape[-2], y.shape[-1]
-        
+
         if has_np and not isinstance(padded_y, MockArray) and not isinstance(y, MockArray):
             padded_y[i, :, :h, :w] = y
         else:
@@ -203,3 +300,109 @@ def collate_latent_samples(batch_items: List[Dict[str, Any]]) -> Dict[str, Any]:
         result["targets"] = torch.tensor(targets, dtype=torch.float32) if has_torch else targets
 
     return result
+
+
+def compute_train_norm_stats(
+    dataset: LatentDataset,
+    max_samples: int = 500,
+    seed: int = 42,
+    epsilon: float = 1e-5,
+) -> Dict[str, Tuple[List[float], List[float]]]:
+    """Compute per-channel mean and std over training split latents on valid cells only.
+
+    Args:
+        dataset: LatentDataset filtered to training split.
+        max_samples: Number of stratified samples across lambdas.
+        seed: Random seed for sampling.
+        epsilon: Minimum clamp on standard deviation for dead/dormant channels.
+
+    Returns:
+        Dict with keys 'y' (and 'z' if Config B), mapping to (mean_list, std_list).
+    """
+    if len(dataset) == 0:
+        return {"y": ([0.0] * 320, [1.0] * 320)}
+
+    rng = random.Random(seed)
+    # Stratified sampling across lambdas
+    by_lambda = defaultdict(list)
+    for idx in range(len(dataset)):
+        item_row = dataset.samples[idx]
+        by_lambda[int(item_row["lambda_idx"])].append(idx)
+
+    per_lambda_k = max(1, max_samples // max(1, len(by_lambda)))
+    sample_indices = []
+    for l_idx, indices in by_lambda.items():
+        sampled = rng.sample(indices, min(per_lambda_k, len(indices)))
+        sample_indices.extend(sampled)
+
+    sample_indices = sample_indices[:max_samples]
+
+    try:
+        import numpy as np
+        has_np = True
+    except ImportError:
+        has_np = False
+
+    if has_np:
+        y_sum = None
+        y_sq_sum = None
+        y_count = 0
+
+        z_sum = None
+        z_sq_sum = None
+        z_count = 0
+
+        for idx in sample_indices:
+            item = dataset[idx]
+            y = np.asarray(item["y_hat"], dtype=np.float32)
+            mask = np.asarray(item["valid_mask"], dtype=bool) if item.get("valid_mask") is not None else None
+
+            if y_sum is None:
+                c_y = y.shape[0]
+                y_sum = np.zeros(c_y, dtype=np.float64)
+                y_sq_sum = np.zeros(c_y, dtype=np.float64)
+
+            if mask is not None:
+                valid_y = y[:, mask]  # (C, N_valid)
+                num_v = valid_y.shape[1]
+                if num_v > 0:
+                    y_sum += np.sum(valid_y, axis=1)
+                    y_sq_sum += np.sum(valid_y ** 2, axis=1)
+                    y_count += num_v
+            else:
+                flat_y = y.reshape(y.shape[0], -1)
+                y_sum += np.sum(flat_y, axis=1)
+                y_sq_sum += np.sum(flat_y ** 2, axis=1)
+                y_count += flat_y.shape[1]
+
+            if "z_hat" in item and item["z_hat"] is not None:
+                z = np.asarray(item["z_hat"], dtype=np.float32)
+                if z_sum is None:
+                    c_z = z.shape[0]
+                    z_sum = np.zeros(c_z, dtype=np.float64)
+                    z_sq_sum = np.zeros(c_z, dtype=np.float64)
+
+                flat_z = z.reshape(z.shape[0], -1)
+                z_sum += np.sum(flat_z, axis=1)
+                z_sq_sum += np.sum(flat_z ** 2, axis=1)
+                z_count += flat_z.shape[1]
+
+        y_denom = max(y_count, 1)
+        mean_y = (y_sum / y_denom).tolist()
+        var_y = np.maximum(0.0, (y_sq_sum / y_denom) - (np.array(mean_y) ** 2))
+        std_y = np.maximum(epsilon, np.sqrt(var_y)).tolist()
+
+        result = {"y": (mean_y, std_y)}
+
+        if z_sum is not None:
+            z_denom = max(z_count, 1)
+            mean_z = (z_sum / z_denom).tolist()
+            var_z = np.maximum(0.0, (z_sq_sum / z_denom) - (np.array(mean_z) ** 2))
+            std_z = np.maximum(epsilon, np.sqrt(var_z)).tolist()
+            result["z"] = (mean_z, std_z)
+
+        return result
+
+    # Pure Python fallback for environments without numpy
+    c_y = 320
+    return {"y": ([0.0] * c_y, [1.0] * c_y)}

@@ -3,7 +3,7 @@ stage: train
 config_name: blind_a
 manifest_path: data/manifest.parquet
 latent_store_dir: data/latents
-output_dir: reports/checkpoints/blind_a
+output_dir: checkpoints/blind_a
 history_path: reports/training_blind_a_history.csv
 plot_path: reports/training_blind_a_curves.png
 
@@ -13,10 +13,11 @@ model:
   width: 256
   num_res_blocks: 6
   lambda_mode: blind
+  num_lambdas: 6
   dropout: 0.1
 
 loss:
-  smooth_l1_beta: 1.0
+  smooth_l1_beta: 0.05
   alpha_rank: 0.5
   rank_margin: 0.0
 
@@ -30,3 +31,4 @@ training:
   grad_clip: 1.0
   precision: bf16
   seed: 42
+  num_workers: 4

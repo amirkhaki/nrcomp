@@ -3,7 +3,7 @@ stage: train
 config_name: conditioned_a
 manifest_path: data/manifest.parquet
 latent_store_dir: data/latents
-output_dir: reports/checkpoints/conditioned_a
+output_dir: checkpoints/conditioned_a
 history_path: reports/training_conditioned_a_history.csv
 plot_path: reports/training_conditioned_a_curves.png
 
@@ -18,7 +18,7 @@ model:
   dropout: 0.1
 
 loss:
-  smooth_l1_beta: 1.0
+  smooth_l1_beta: 0.05
   alpha_rank: 0.5
   rank_margin: 0.0
 
@@ -32,3 +32,4 @@ training:
   grad_clip: 1.0
   precision: bf16
   seed: 42
+  num_workers: 4

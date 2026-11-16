@@ -1,4 +1,4 @@
-.PHONY: setup-conda-envs setup-envs download-datasets download-weights test-unit codec-sanity help
+.PHONY: setup-conda-envs setup-envs download-datasets download-weights test-unit test-server run-baselines train-blind train-conditioned train-config-b codec-sanity help
 
 help:
 	@echo "nrcomp execution targets:"
@@ -6,7 +6,12 @@ help:
 	@echo "  make setup-envs         - Create .venv-codec and .venv-main venvs"
 	@echo "  make download-datasets  - Download Kodak, KonIQ-10k, and LiveC into data/raw/"
 	@echo "  make download-weights   - Download ELIC checkpoints and run updata.py"
-	@echo "  make test-unit          - Run offline unit tests with pytest"
+	@echo "  make test-unit          - Run offline unit tests (dev & server)"
+	@echo "  make test-server        - Run PyTorch server integration tests (server only)"
+	@echo "  make run-baselines      - Run E5 shortcut baselines (a, b, c) on manifest"
+	@echo "  make train-blind        - Train Config A Blind Student"
+	@echo "  make train-conditioned  - Train Config A Conditioned Student"
+	@echo "  make train-config-b     - Train Config B (y_hat + z_hat) Student"
 	@echo "  make codec-sanity       - Run Stage 1 Codec Sanity Gate on Kodak"
 
 setup-conda-envs:
@@ -37,6 +42,26 @@ test-unit:
 	else \
 		python3 -m unittest discover -s tests/unit -p "test_*.py" -v; \
 	fi
+
+test-server:
+	conda run --no-capture-output -n nrcomp-main pytest tests/server -v
+
+run-baselines:
+	conda run --no-capture-output -n nrcomp-main python scripts/shortcut_baselines.py \
+		--manifest data/manifest.parquet \
+		--output reports/e5_baselines.md
+
+train-blind:
+	conda run --no-capture-output -n nrcomp-main python -m nrcomp.train \
+		--config configs/train_blind.yaml
+
+train-conditioned:
+	conda run --no-capture-output -n nrcomp-main python -m nrcomp.train \
+		--config configs/train_conditioned.yaml
+
+train-config-b:
+	conda run --no-capture-output -n nrcomp-main python -m nrcomp.train \
+		--config configs/train_config_b.yaml
 
 codec-sanity:
 	@if command -v conda >/dev/null && conda info --envs | grep -q "nrcomp-codec"; then \
