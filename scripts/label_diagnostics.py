@@ -94,8 +94,13 @@ def main():
     output_path = (PROJECT_ROOT / args.output) if not Path(args.output).is_absolute() else Path(args.output)
 
     if not manifest_path.exists():
-        print(f"[ERROR] Manifest not found: {manifest_path}")
-        sys.exit(1)
+        if manifest_path.suffix == ".parquet" and manifest_path.with_suffix(".csv").exists():
+            manifest_path = manifest_path.with_suffix(".csv")
+        elif manifest_path.suffix == ".csv" and manifest_path.with_suffix(".parquet").exists():
+            manifest_path = manifest_path.with_suffix(".parquet")
+        else:
+            print(f"[ERROR] Manifest not found: {manifest_path}")
+            sys.exit(1)
 
     manifest = ParquetManifest(manifest_path)
     rows = manifest.get_all_rows()

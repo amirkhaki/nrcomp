@@ -100,6 +100,12 @@ class ManifestManager:
 
     def __init__(self, manifest_path: Union[str, Path]):
         self.manifest_path = Path(manifest_path)
+        # If requested path does not exist, check fallback extensions
+        if not self.manifest_path.exists():
+            if self.manifest_path.suffix == ".parquet" and self.manifest_path.with_suffix(".csv").exists():
+                self.manifest_path = self.manifest_path.with_suffix(".csv")
+            elif self.manifest_path.suffix == ".csv" and self.manifest_path.with_suffix(".parquet").exists():
+                self.manifest_path = self.manifest_path.with_suffix(".parquet")
         self.rows: List[Dict[str, Any]] = []
         if self.manifest_path.exists():
             self.load()
@@ -107,24 +113,43 @@ class ManifestManager:
     def load(self):
         """Load manifest from Parquet or fallback formats."""
         path = self.manifest_path
-        if path.suffix == ".parquet":
+        if path.suffix == ".parquet" and path.exists():
             try:
                 import pandas as pd
                 df = pd.read_parquet(path)
                 self.rows = df.to_dict(orient="records")
                 return
-            except ImportError:
+            except (ImportError, Exception):
                 pass
 
-        if path.suffix == ".csv" or (not path.exists() and path.with_suffix(".csv").exists()):
-            csv_path = path if path.suffix == ".csv" else path.with_suffix(".csv")
+        csv_path = path if path.suffix == ".csv" else path.with_suffix(".csv")
+        if csv_path.exists():
             with open(csv_path, "r", newline="", encoding="utf-8") as f:
                 reader = csv.DictReader(f)
-                self.rows = [dict(r) for r in reader]
+                loaded_rows = []
+                for r in reader:
+                    row_dict = dict(r)
+                    # Convert typed numeric fields
+                    for int_k in ["height", "width", "padded_height", "padded_width", "lambda_idx"]:
+                        if row_dict.get(int_k) not in (None, ""):
+                            try:
+                                row_dict[int_k] = int(row_dict[int_k])
+                            except ValueError:
+                                pass
+                    for float_k in ["lambda_value", "bpp_actual", "bpp_est", "psnr", "haarpsi", "dists", "orig_mos"]:
+                        if row_dict.get(float_k) not in (None, ""):
+                            try:
+                                row_dict[float_k] = float(row_dict[float_k])
+                            except ValueError:
+                                pass
+                        elif float_k in ["psnr", "haarpsi", "dists"]:
+                            row_dict[float_k] = None
+                    loaded_rows.append(row_dict)
+                self.rows = loaded_rows
             return
 
         # Attempt to read as json lines if fallback
-        if path.suffix == ".jsonl":
+        if path.suffix == ".jsonl" and path.exists():
             with open(path, "r", encoding="utf-8") as f:
                 self.rows = [json.loads(line) for line in f]
             return
@@ -134,29 +159,26 @@ class ManifestManager:
         self.manifest_path.parent.mkdir(parents=True, exist_ok=True)
         path = self.manifest_path
 
-        # Prefer saving to parquet if pandas and pyarrow are available
-        saved_as_parquet = False
-        if path.suffix == ".parquet":
-            try:
-                import pandas as pd
-                df = pd.DataFrame(self.rows)
-                tmp_path = path.with_suffix(".parquet.tmp")
-                df.to_parquet(tmp_path, index=False)
-                os.replace(tmp_path, path)
-                saved_as_parquet = True
-            except ImportError:
-                saved_as_parquet = False
+        # If pandas is available, always write parquet
+        try:
+            import pandas as pd
+            parquet_path = path if path.suffix == ".parquet" else path.with_suffix(".parquet")
+            tmp_parquet = parquet_path.with_suffix(".parquet.tmp")
+            df = pd.DataFrame(self.rows)
+            df.to_parquet(tmp_parquet, index=False)
+            os.replace(tmp_parquet, parquet_path)
+        except (ImportError, Exception):
+            pass
 
-        if not saved_as_parquet:
-            # Fallback to atomic CSV
-            csv_path = path if path.suffix == ".csv" else path.with_suffix(".csv")
-            tmp_path = csv_path.with_suffix(".csv.tmp")
-            with open(tmp_path, "w", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=MANIFEST_COLUMNS)
-                writer.writeheader()
-                for row in self.rows:
-                    writer.writerow({k: row.get(k, "") for k in MANIFEST_COLUMNS})
-            os.replace(tmp_path, csv_path)
+        # Always also save/mirror CSV for resilience
+        csv_path = path if path.suffix == ".csv" else path.with_suffix(".csv")
+        tmp_csv = csv_path.with_suffix(".csv.tmp")
+        with open(tmp_csv, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=MANIFEST_COLUMNS)
+            writer.writeheader()
+            for row in self.rows:
+                writer.writerow({k: row.get(k, "") for k in MANIFEST_COLUMNS})
+        os.replace(tmp_csv, csv_path)
 
     def add_or_update_row(self, row_dict: Dict[str, Any]):
         """Add or update a row indexed by (dataset, image_id, lambda_idx)."""

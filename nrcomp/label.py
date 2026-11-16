@@ -31,8 +31,13 @@ def main():
     manifest_path = (PROJECT_ROOT / manifest_path_raw) if not Path(manifest_path_raw).is_absolute() else Path(manifest_path_raw)
 
     if not manifest_path.exists():
-        print(f"[ERROR] Manifest not found: {manifest_path}")
-        sys.exit(1)
+        if manifest_path.suffix == ".parquet" and manifest_path.with_suffix(".csv").exists():
+            manifest_path = manifest_path.with_suffix(".csv")
+        elif manifest_path.suffix == ".csv" and manifest_path.with_suffix(".parquet").exists():
+            manifest_path = manifest_path.with_suffix(".parquet")
+        else:
+            print(f"[ERROR] Manifest not found: {manifest_path}")
+            sys.exit(1)
 
     device = args.device or cfg.get("device", "cuda")
     metrics_list = [m["name"] if isinstance(m, dict) else m for m in cfg.get("metrics", ["haarpsi", "dists", "psnr"])]

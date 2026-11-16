@@ -22,6 +22,9 @@ echo ""
 echo "=== Step 1: Checking Datasets (Python Downloader) ==="
 conda run --no-capture-output -n nrcomp-main python scripts/download_datasets.py || true
 
+# Ensure pandas & pyarrow are in codec env if not present
+conda run -n nrcomp-codec pip install pandas pyarrow || true
+
 # 2. Stage 2: Pilot Data Generation (100 KonIQ images)
 echo ""
 echo "=== Step 2: Running 100-Image Pilot Data Generation (Stage 2) ==="
