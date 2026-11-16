@@ -60,20 +60,43 @@ class QualityMetrics:
         self._init_models()
 
     def _init_models(self):
-        """Lazy or eager initialization of PyIQA metric models."""
+        """Lazy or eager initialization of metric models (piq and pyiqa)."""
         try:
-            import pyiqa
             import torch
-
             actual_device = self.device if (torch.cuda.is_available() and self.device == "cuda") else "cpu"
+        except ImportError:
+            return
 
-            if "haarpsi" in self.enable_metrics:
-                self.models["haarpsi"] = pyiqa.create_metric("haarpsi", device=actual_device)
-            if "dists" in self.enable_metrics:
+        # 1. HaarPSI: Try piq first, fallback to pyiqa
+        if "haarpsi" in self.enable_metrics:
+            try:
+                import piq
+                self.models["haarpsi"] = lambda recon, orig: float(piq.haarpsi(recon, orig, data_range=1.0).item())
+                print(f"[QualityMetrics] Initialized HaarPSI via piq on device: {actual_device}")
+            except ImportError:
+                try:
+                    import pyiqa
+                    self.models["haarpsi"] = pyiqa.create_metric("haarpsi", device=actual_device)
+                    print(f"[QualityMetrics] Initialized HaarPSI via pyiqa on device: {actual_device}")
+                except Exception as e:
+                    print(f"[QualityMetrics WARN] Failed to initialize HaarPSI (piq not found, pyiqa error: {e})")
+            except Exception as e:
+                print(f"[QualityMetrics WARN] Failed to initialize HaarPSI via piq: {e}")
+
+        # 2. DISTS: Try pyiqa first, fallback to piq
+        if "dists" in self.enable_metrics:
+            try:
+                import pyiqa
                 self.models["dists"] = pyiqa.create_metric("dists", device=actual_device)
-        except (ImportError, Exception):
-            # Graceful fallback for offline environment without pyiqa/torch
-            pass
+                print(f"[QualityMetrics] Initialized DISTS via pyiqa on device: {actual_device}")
+            except Exception as e1:
+                try:
+                    import piq
+                    dists_mod = piq.DISTS(reduction="none").to(actual_device)
+                    self.models["dists"] = lambda recon, orig: float(dists_mod(recon, orig).mean().item())
+                    print(f"[QualityMetrics] Initialized DISTS via piq fallback on device: {actual_device}")
+                except Exception as e2:
+                    print(f"[QualityMetrics WARN] Failed to initialize DISTS: pyiqa: {e1}, piq: {e2}")
 
     def _to_tensor(self, img: Any) -> Any:
         """Convert input uint8 or float image to (1, 3, H, W) float32 tensor in [0, 1]."""
@@ -121,7 +144,7 @@ class QualityMetrics:
             except Exception:
                 results["psnr"] = 0.0
 
-        # PyIQA metrics (HaarPSI, DISTS)
+        # Neural / FR metrics (HaarPSI, DISTS)
         try:
             import torch
             with torch.no_grad():
@@ -135,7 +158,9 @@ class QualityMetrics:
                 if "dists" in self.enable_metrics and "dists" in self.models:
                     val = self.models["dists"](t_recon, t_orig)
                     results["dists"] = float(val.item() if hasattr(val, "item") else val)
-        except (ImportError, Exception):
+        except ImportError:
             pass
+        except Exception as e:
+            print(f"[QualityMetrics WARN] Metric computation failed: {e}")
 
         return results

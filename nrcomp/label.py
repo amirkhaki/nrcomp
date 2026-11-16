@@ -5,6 +5,7 @@ CLI Entry point:
 """
 
 import argparse
+import math
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -47,12 +48,21 @@ def main():
     rows = manifest.get_all_rows()
     print(f"Total manifest rows: {len(rows)}")
 
+    def is_missing_value(val):
+        if val is None:
+            return True
+        try:
+            f = float(val)
+            return math.isnan(f) or math.isinf(f)
+        except (ValueError, TypeError):
+            return True
+
     # Filter rows that need labelling
     rows_to_label = []
     for r in rows:
         needs_label = False
         for m in metrics_list:
-            if r.get(m) is None:
+            if is_missing_value(r.get(m)):
                 needs_label = True
                 break
         if needs_label:
@@ -70,6 +80,15 @@ def main():
     actual_device = device if (torch.cuda.is_available() and device == "cuda") else "cpu"
     print(f"Initializing QualityMetrics on device: {actual_device}")
     quality_metrics = QualityMetrics(device=actual_device, enable_metrics=metrics_list)
+
+    # Validate that models for required metrics are initialized
+    missing_models = [m for m in metrics_list if m != "psnr" and m not in quality_metrics.models]
+    if missing_models:
+        print(f"[ERROR] Required metric models could not be loaded: {missing_models}")
+        print(f"Loaded models: {list(quality_metrics.models.keys())}")
+        print("Please ensure piq and pyiqa are installed in this environment:")
+        print("  conda run -n nrcomp-main pip install -i https://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn piq pyiqa")
+        sys.exit(1)
 
     # In case we need on-the-fly reconstruction from latents
     latent_store = LatentStore(root_dir=PROJECT_ROOT / "data" / "latents")

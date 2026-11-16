@@ -106,13 +106,24 @@ def main():
     rows = manifest.get_all_rows()
     print(f"Loaded {len(rows)} samples from {manifest_path}.")
 
+    def is_valid_metric(v):
+        if v is None:
+            return False
+        try:
+            f = float(v)
+            return not (math.isnan(f) or math.isinf(f))
+        except (ValueError, TypeError):
+            return False
+
     # Filter rows with complete metrics
     valid_rows = [
         r for r in rows
-        if r.get("haarpsi") is not None and r.get("dists") is not None and r.get("bpp_actual") is not None
+        if is_valid_metric(r.get("haarpsi")) and is_valid_metric(r.get("dists")) and is_valid_metric(r.get("bpp_actual"))
     ]
     if len(valid_rows) == 0:
-        print("[ERROR] No rows with complete labels (haarpsi, dists, bpp_actual) found.")
+        sample_vals = {k: rows[0].get(k) for k in ["haarpsi", "dists", "psnr", "bpp_actual"]} if rows else {}
+        print(f"[ERROR] No rows with complete labels (haarpsi, dists, bpp_actual) found.")
+        print(f"Sample row metric values: {sample_vals}")
         sys.exit(1)
 
     print(f"Analyzing {len(valid_rows)} fully-labelled samples.")

@@ -3,6 +3,7 @@
 torch>=2.1.0
 torchvision
 pyiqa>=0.1.11
+piq>=0.8.0
 timm
 matplotlib>=3.7.0
 pandas>=2.0.0

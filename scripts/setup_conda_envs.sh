@@ -107,8 +107,8 @@ echo "[+] Verifying PyTorch + CUDA and scientific stack via Conda..."
 conda install -n nrcomp-main pytorch torchvision pytorch-gpu \
     pandas pyarrow scipy scikit-learn matplotlib pyyaml tqdm pytest timm -y
 
-echo "[+] Installing pyiqa via pip..."
-pip_install_safe "nrcomp-main" pyiqa
+echo "[+] Installing pyiqa and piq via pip..."
+pip_install_safe "nrcomp-main" pyiqa piq
 
 echo ""
 echo "=========================================================="

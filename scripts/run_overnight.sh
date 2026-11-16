@@ -28,6 +28,12 @@ conda run --no-capture-output -n nrcomp-codec pip install \
     --trusted-host pypi.tuna.tsinghua.edu.cn \
     pandas pyarrow || true
 
+# Ensure piq is in main env for HaarPSI
+conda run --no-capture-output -n nrcomp-main pip install \
+    -i https://pypi.tuna.tsinghua.edu.cn/simple \
+    --trusted-host pypi.tuna.tsinghua.edu.cn \
+    piq || true
+
 # 2. Stage 2: Pilot Data Generation (100 KonIQ images)
 echo ""
 echo "=== Step 2: Running 100-Image Pilot Data Generation (Stage 2) ==="
