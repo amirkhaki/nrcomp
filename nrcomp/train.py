@@ -196,7 +196,7 @@ def main():
     grad_clip = float(train_cfg.get("grad_clip", 1.0))
     precision = str(train_cfg.get("precision", "bf16"))
     seed = int(train_cfg.get("seed", 42))
-    num_workers = int(train_cfg.get("num_workers", 4))
+    num_workers = int(train_cfg.get("num_workers", 0))
     early_stopping_patience = int(train_cfg.get("early_stopping_patience", 5))
     early_stopping_min_delta = float(train_cfg.get("early_stopping_min_delta", 0.0005))
     early_stopper = EarlyStopping(
@@ -298,7 +298,7 @@ def main():
         num_workers=num_workers,
         pin_memory=(device.type == "cuda"),
         persistent_workers=(num_workers > 0),
-        worker_init_fn=seed_worker,
+        worker_init_fn=seed_worker if num_workers > 0 else None,
     )
     val_loader = DataLoader(
         val_dataset,

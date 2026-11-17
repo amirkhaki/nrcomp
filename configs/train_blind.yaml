@@ -31,6 +31,6 @@ training:
   grad_clip: 1.0
   precision: bf16
   seed: 42
-  num_workers: 4
+  num_workers: 0
   early_stopping_patience: 5
   early_stopping_min_delta: 0.0005
