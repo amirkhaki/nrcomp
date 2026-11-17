@@ -47,6 +47,40 @@ def get_git_revision_hash() -> str:
         return "unknown"
 
 
+class EarlyStopping:
+    """Early stopping handler tracking validation metric improvements."""
+
+    def __init__(self, patience: int = 15, min_delta: float = 0.0005, warmup_epochs: int = 2):
+        self.patience = int(patience)
+        self.min_delta = float(min_delta)
+        self.warmup_epochs = int(warmup_epochs)
+        self.counter = 0
+        self.best_score: Optional[float] = None
+        self.early_stop = False
+
+    def step(self, score: float, epoch: int) -> bool:
+        """Update tracker with new score. Returns True if score improved."""
+        if self.best_score is None:
+            self.best_score = score
+            self.counter = 0
+            return True
+
+        if score > self.best_score + self.min_delta:
+            self.best_score = score
+            self.counter = 0
+            return True
+
+        if score > self.best_score:
+            self.best_score = score
+
+        if self.patience > 0 and epoch > self.warmup_epochs:
+            self.counter += 1
+            if self.counter >= self.patience:
+                self.early_stop = True
+
+        return False
+
+
 def build_cosine_scheduler_with_warmup(
     optimizer: Any, warmup_epochs: int, total_epochs: int, min_lr: float = 1e-6
 ):
@@ -163,6 +197,13 @@ def main():
     precision = str(train_cfg.get("precision", "bf16"))
     seed = int(train_cfg.get("seed", 42))
     num_workers = int(train_cfg.get("num_workers", 4))
+    early_stopping_patience = int(train_cfg.get("early_stopping_patience", 15))
+    early_stopping_min_delta = float(train_cfg.get("early_stopping_min_delta", 0.0005))
+    early_stopper = EarlyStopping(
+        patience=early_stopping_patience,
+        min_delta=early_stopping_min_delta,
+        warmup_epochs=warmup_epochs,
+    )
 
     # Model parameters
     model_cfg = cfg.get("model", {})
@@ -487,7 +528,8 @@ def main():
         torch.save(checkpoint_dict, output_dir / "latest_model.pth")
 
         # Checkpoint: Best (based on within-lambda SROCC)
-        if mean_within_srocc > best_within_lambda_srocc:
+        improved = early_stopper.step(mean_within_srocc, epoch=epoch)
+        if improved:
             best_within_lambda_srocc = mean_within_srocc
             best_epoch = epoch
             torch.save(checkpoint_dict, output_dir / "best_model.pth")
@@ -496,6 +538,16 @@ def main():
             weights_best_path.parent.mkdir(parents=True, exist_ok=True)
             torch.save(checkpoint_dict, weights_best_path)
             print(f"  --> [NEW BEST] Within-Lambda SROCC = {mean_within_srocc:.4f} saved to {weights_best_path}")
+        elif early_stopping_patience > 0 and epoch > warmup_epochs:
+            print(f"  --> Early stopping counter: {early_stopper.counter}/{early_stopping_patience}")
+
+        if early_stopper.early_stop:
+            print(
+                f"\n[EARLY STOPPING] Triggered at epoch {epoch}. "
+                f"Validation within-lambda SROCC did not improve by {early_stopping_min_delta} "
+                f"for {early_stopping_patience} consecutive epochs. Best was {best_within_lambda_srocc:.4f} at epoch {best_epoch}."
+            )
+            break
 
     # Write history CSV
     with open(history_path, "w", newline="", encoding="utf-8") as f:

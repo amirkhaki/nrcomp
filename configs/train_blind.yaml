@@ -32,3 +32,5 @@ training:
   precision: bf16
   seed: 42
   num_workers: 4
+  early_stopping_patience: 15
+  early_stopping_min_delta: 0.0005
