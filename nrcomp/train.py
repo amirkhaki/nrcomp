@@ -50,7 +50,7 @@ def get_git_revision_hash() -> str:
 class EarlyStopping:
     """Early stopping handler tracking validation metric improvements."""
 
-    def __init__(self, patience: int = 15, min_delta: float = 0.0005, warmup_epochs: int = 2):
+    def __init__(self, patience: int = 5, min_delta: float = 0.0005, warmup_epochs: int = 2):
         self.patience = int(patience)
         self.min_delta = float(min_delta)
         self.warmup_epochs = int(warmup_epochs)
@@ -197,7 +197,7 @@ def main():
     precision = str(train_cfg.get("precision", "bf16"))
     seed = int(train_cfg.get("seed", 42))
     num_workers = int(train_cfg.get("num_workers", 4))
-    early_stopping_patience = int(train_cfg.get("early_stopping_patience", 15))
+    early_stopping_patience = int(train_cfg.get("early_stopping_patience", 5))
     early_stopping_min_delta = float(train_cfg.get("early_stopping_min_delta", 0.0005))
     early_stopper = EarlyStopping(
         patience=early_stopping_patience,
