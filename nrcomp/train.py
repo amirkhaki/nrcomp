@@ -296,7 +296,10 @@ def main():
         if (precision == "bf16" and torch.cuda.is_bf16_supported())
         else torch.float16
     )
-    scaler = torch.cuda.amp.GradScaler(enabled=(use_autocast and autocast_dtype == torch.float16))
+    try:
+        scaler = torch.amp.GradScaler(device_type=device.type, enabled=(use_autocast and autocast_dtype == torch.float16))
+    except (AttributeError, TypeError):
+        scaler = torch.cuda.amp.GradScaler(enabled=(use_autocast and autocast_dtype == torch.float16))
 
     # Save run metadata
     meta = {
