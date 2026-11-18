@@ -129,7 +129,20 @@ python scripts/shortcut_baselines.py --manifest data/manifest.parquet --output r
 python -m nrcomp.evaluate --config configs/evaluate.yaml --output reports/eval_main.md
 ```
 
-### Step 5: (Optional Multi-Seed Training & Aggregation)
+### Step 5: Retrain All Configurations & Ablations (New)
+To redo all training with all configurations and ablations in one command:
+```bash
+# Redo all 8 configurations & ablations (seed 42)
+make train-all
+
+# Or redo all configurations across 3 seeds (seeds 42, 43, 44) + auto multi-seed aggregation
+make train-all-seeds
+
+# Or train only the architectural ablations
+make train-ablations
+```
+
+### Step 6: (Optional Multi-Seed Training & Aggregation Manually)
 ```bash
 # Train additional seeds (e.g. seeds 43 and 44) if desired:
 python -m nrcomp.train --config configs/student_blind_a.yaml --seed 43

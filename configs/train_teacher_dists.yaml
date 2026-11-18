@@ -10,7 +10,7 @@ target_metric: dists  # Optimizes directly on second teacher DISTS (Ablation A5)
 
 model:
   config: B  # y_hat + z_hat
-  in_channels: 320
+  in_channels_y: 320
   in_channels_z: 192
   width: 256
   num_res_blocks: 6
