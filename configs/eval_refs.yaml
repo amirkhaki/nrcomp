@@ -1,0 +1,13 @@
+# Stage 6: Pixel References & Comparative Baselines Configuration
+stage: eval_refs
+manifest_path: data/manifest.parquet
+latent_store_dir: data/latents
+recon_dir: data/recon
+
+metrics:
+  - clipiqa
+  - niqe
+  - musiq
+
+eval_refs_report: reports/eval_refs.md
+ablations_report: reports/ablations.md

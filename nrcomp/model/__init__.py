@@ -8,6 +8,7 @@ from nrcomp.model.pooling import (
     masked_mean_pool_oracle,
 )
 from nrcomp.model.student import LatentStudent
+from nrcomp.model.pixel_student import PixelStudent
 from nrcomp.model.trunk import ConvStem, ResBlock, Trunk
 
 __all__ = [
@@ -19,6 +20,7 @@ __all__ = [
     "masked_mean_pool_oracle",
     "masked_attention_pool_oracle",
     "LatentStudent",
+    "PixelStudent",
     "CompositeLoss",
     "composite_loss_oracle",
 ]

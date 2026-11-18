@@ -1,0 +1,40 @@
+# Stage 4: Latent Student Training - Ablation A5 (Teacher = DISTS)
+stage: train
+config_name: teacher_dists_b
+manifest_path: data/manifest.parquet
+latent_store_dir: data/latents
+output_dir: checkpoints/teacher_dists_b
+history_path: reports/training_teacher_dists_b_history.csv
+plot_path: reports/training_teacher_dists_b_curves.png
+target_metric: dists  # Optimizes directly on second teacher DISTS (Ablation A5)
+
+model:
+  config: B  # y_hat + z_hat
+  in_channels: 320
+  in_channels_z: 192
+  width: 256
+  num_res_blocks: 6
+  lambda_mode: conditioned
+  num_lambdas: 6
+  lambda_embed_dim: 256
+  dropout: 0.1
+  use_mask: true
+
+loss:
+  smooth_l1_beta: 0.05
+  alpha_rank: 0.5
+  rank_margin: 0.0
+
+training:
+  epochs: 60
+  warmup_epochs: 2
+  batch_images: 8
+  lambdas_per_image: 3
+  lr: 0.0003
+  weight_decay: 0.05
+  grad_clip: 1.0
+  precision: bf16
+  seed: 42
+  num_workers: 0
+  early_stopping_patience: 5
+  early_stopping_min_delta: 0.0005
