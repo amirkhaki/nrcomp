@@ -12,6 +12,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
+from nrcomp.labels.registry import prepare_target_value
+
 try:
     import torch
     from torch.utils.data import Dataset as TorchDataset
@@ -90,12 +92,15 @@ class LatentDataset(TorchDataset):
         if self.config == "B":
             z_hat = latents.get("z_hat")
 
+        raw_target = float(row[self.target_metric])
+        target_val = prepare_target_value(raw_target, self.target_metric)
+
         item = {
             "y_hat": y_hat,
             "valid_mask": valid_mask,
             "image_id": str(row["image_id"]),
             "lambda_idx": int(row["lambda_idx"]),
-            "target": float(row[self.target_metric]),
+            "target": float(target_val),
             "bpp_actual": float(row["bpp_actual"]) if row.get("bpp_actual") is not None else 0.0,
             "orig_mos": float(row["orig_mos"]) if row.get("orig_mos") is not None else None,
             "dists": float(row["dists"]) if row.get("dists") is not None else None,

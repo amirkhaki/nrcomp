@@ -6,6 +6,8 @@ CLI Entry point:
 
 import argparse
 import csv
+import datetime
+import hashlib
 import json
 import math
 import os
@@ -14,7 +16,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -34,8 +36,20 @@ from nrcomp.data.dataset import (
 )
 from nrcomp.data.manifest import ParquetManifest
 from nrcomp.data.store import LatentStore
+from nrcomp.labels.registry import get_metric_spec
 from nrcomp.model.loss import CompositeLoss
 from nrcomp.model.student import LatentStudent
+
+
+def compute_file_sha256(path: Path) -> str:
+    """Compute hex SHA-256 hash of a file."""
+    if not path.exists():
+        return "MISSING"
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def get_git_revision_hash() -> str:
@@ -45,6 +59,45 @@ def get_git_revision_hash() -> str:
         return out.decode("ascii").strip()
     except Exception:
         return "unknown"
+
+
+def create_run_meta(
+    cfg: Dict[str, Any],
+    out_path: Union[str, Path],
+    config_path: Optional[Union[str, Path]] = None,
+    seed: int = 42,
+    manifest_path: Optional[Union[str, Path]] = None,
+) -> Dict[str, Any]:
+    """Create and write run_meta.json tracking training provenance and target metric."""
+    target_metric = cfg.get("target_metric", "haarpsi")
+    metric_spec = get_metric_spec(target_metric)
+
+    cfg_p = Path(config_path) if config_path else Path("configs/default.yaml")
+    man_p = Path(manifest_path) if manifest_path else Path(cfg.get("manifest_path", "data/manifest.parquet"))
+    if not man_p.is_absolute():
+        man_p = PROJECT_ROOT / man_p
+
+    train_cfg = cfg.get("training", {})
+    run_meta = {
+        "run_name": cfg.get("run_name", "unnamed_run"),
+        "git_sha": get_git_revision_hash(),
+        "config_path": str(cfg_p),
+        "config_sha256": compute_file_sha256(cfg_p),
+        "manifest_path": str(man_p),
+        "manifest_sha256": compute_file_sha256(man_p),
+        "target_metric": target_metric,
+        "target_transform": metric_spec.transform,
+        "seed": seed,
+        "precision": train_cfg.get("precision", "fp32"),
+        "lr": train_cfg.get("lr", 0.0001),
+        "epochs": train_cfg.get("epochs", 50),
+        "created_at": datetime.datetime.now().isoformat(),
+    }
+    out_p = Path(out_path)
+    out_p.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_p, "w", encoding="utf-8") as f:
+        json.dump(run_meta, f, indent=2)
+    return run_meta
 
 
 class EarlyStopping:
@@ -163,27 +216,15 @@ def main():
     parser.add_argument("--config", type=str, required=True, help="Path to YAML configuration.")
     parser.add_argument("--device", type=str, default=None, help="Device (cuda or cpu).")
     parser.add_argument("--manifest", type=str, default=None, help="Override manifest path.")
+    parser.add_argument("--seed", type=int, default=None, help="Override random seed.")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
     config_name = cfg.get("config_name", "student_model")
 
-    # Paths
-    manifest_path_raw = args.manifest or cfg.get("manifest_path", "data/manifest.parquet")
-    manifest_path = (PROJECT_ROOT / manifest_path_raw) if not Path(manifest_path_raw).is_absolute() else Path(manifest_path_raw)
-    latent_store_dir = PROJECT_ROOT / cfg.get("latent_store_dir", "data/latents")
-
-    output_dir_raw = cfg.get("output_dir", f"checkpoints/{config_name}")
-    output_dir = (PROJECT_ROOT / output_dir_raw) if not Path(output_dir_raw).is_absolute() else Path(output_dir_raw)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    history_path_raw = cfg.get("history_path", f"reports/training_{config_name}_history.csv")
-    history_path = (PROJECT_ROOT / history_path_raw) if not Path(history_path_raw).is_absolute() else Path(history_path_raw)
-    history_path.parent.mkdir(parents=True, exist_ok=True)
-
-    plot_path_raw = cfg.get("plot_path", f"reports/training_{config_name}_curves.png")
-    plot_path = (PROJECT_ROOT / plot_path_raw) if not Path(plot_path_raw).is_absolute() else Path(plot_path_raw)
-    plot_path.parent.mkdir(parents=True, exist_ok=True)
+    # Target metric & registry
+    target_metric = str(cfg.get("target_metric", "haarpsi")).lower()
+    metric_spec = get_metric_spec(target_metric)
 
     # Training parameters
     train_cfg = cfg.get("training", {})
@@ -195,14 +236,45 @@ def main():
     weight_decay = float(train_cfg.get("weight_decay", 0.05))
     grad_clip = float(train_cfg.get("grad_clip", 1.0))
     precision = str(train_cfg.get("precision", "bf16"))
-    seed = int(train_cfg.get("seed", 42))
+    seed = int(args.seed if args.seed is not None else train_cfg.get("seed", 42))
     num_workers = int(train_cfg.get("num_workers", 0))
+
+    run_name = f"{config_name}_seed{seed}" if seed != 42 else config_name
+    run_dir = PROJECT_ROOT / "reports" / "runs" / run_name
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    # Paths
+    manifest_path_raw = args.manifest or cfg.get("manifest_path", "data/manifest.parquet")
+    manifest_path = (PROJECT_ROOT / manifest_path_raw) if not Path(manifest_path_raw).is_absolute() else Path(manifest_path_raw)
+    latent_store_dir = PROJECT_ROOT / cfg.get("latent_store_dir", "data/latents")
+
+    output_dir_raw = cfg.get("output_dir", f"checkpoints/{config_name}")
+    output_dir = (PROJECT_ROOT / output_dir_raw) if not Path(output_dir_raw).is_absolute() else Path(output_dir_raw)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    history_path_raw = cfg.get("history_path", f"reports/training_{run_name}_history.csv")
+    history_path = (PROJECT_ROOT / history_path_raw) if not Path(history_path_raw).is_absolute() else Path(history_path_raw)
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+
+    plot_path_raw = cfg.get("plot_path", f"reports/training_{run_name}_curves.png")
+    plot_path = (PROJECT_ROOT / plot_path_raw) if not Path(plot_path_raw).is_absolute() else Path(plot_path_raw)
+    plot_path.parent.mkdir(parents=True, exist_ok=True)
+
     early_stopping_patience = int(train_cfg.get("early_stopping_patience", 5))
     early_stopping_min_delta = float(train_cfg.get("early_stopping_min_delta", 0.0005))
     early_stopper = EarlyStopping(
         patience=early_stopping_patience,
         min_delta=early_stopping_min_delta,
         warmup_epochs=warmup_epochs,
+    )
+
+    # Write run_meta.json
+    run_meta = create_run_meta(
+        cfg=cfg,
+        out_path=run_dir / "run_meta.json",
+        config_path=args.config,
+        seed=seed,
+        manifest_path=manifest_path,
     )
 
     # Model parameters
@@ -266,14 +338,14 @@ def main():
         latent_store=latent_store,
         split="train",
         config=model_config_type,
-        target_metric="haarpsi",
+        target_metric=target_metric,
     )
     val_dataset = LatentDataset(
         rows=all_rows,
         latent_store=latent_store,
         split="val",
         config=model_config_type,
-        target_metric="haarpsi",
+        target_metric=target_metric,
     )
     print(f"Dataset split sizes: train={len(train_dataset)}, val={len(val_dataset)}")
 
@@ -561,6 +633,21 @@ def main():
 
     # Plot Curves
     plot_training_curves(history, plot_path, config_name)
+
+    # Save metrics.json into run directory
+    metrics_summary = {
+        "run_name": run_name,
+        "config_name": config_name,
+        "best_epoch": best_epoch,
+        "best_within_lambda_srocc": best_within_lambda_srocc,
+        "target_metric": target_metric,
+        "target_transform": metric_spec.transform,
+        "seed": seed,
+        "history": history,
+    }
+    with open(run_dir / "metrics.json", "w", encoding="utf-8") as f:
+        json.dump(metrics_summary, f, indent=2)
+    print(f"[SUCCESS] Run metrics artifact logged to {run_dir / 'metrics.json'}")
 
     total_time = time.time() - start_time
     print("===========================================================")

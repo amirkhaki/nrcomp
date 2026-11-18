@@ -1,7 +1,8 @@
-# Project Handover & Milestone M4 Roadmap
+# Project Handover & Execution Status
+
 **Project:** `nrcomp` — No-Reference Compression Degradation Predictor from Codec Latents via Proxy Labels  
 **Date:** November 2026  
-**Status:** Milestones M0, M1, M2, and M3 are **100% Complete & Verified**. Ready to start **Milestone M4**.
+**Status:** Milestones M0–M6 completed; **Milestone M7 (Integrity Fixes & Audit Gate)** ready for server execution.
 
 ---
 
@@ -9,7 +10,7 @@
 
 > [!IMPORTANT]
 > **Strict Separation of Dev Machine vs. Execution Server:**
-> - **Local Development Machine:** Linux, standard Python 3.13 only. **Never run `pip install torch` or heavy ML packages locally.** All unit tests in `tests/unit/` are pure Python (using mocks, lists, or standard library) and must run cleanly with `python -m unittest discover tests/unit` (currently 30/30 passing).
+> - **Local Development Machine:** Linux, standard Python 3.13 only. **Never run `pip install torch` or heavy ML packages locally.** All unit tests in `tests/unit/` are pure Python (using mocks, lists, or standard library) and must run cleanly with `python3 -m unittest discover tests/unit` (76/76 passing).
 > - **Remote Execution Server:** Linux, CUDA 12.4, working directory `/storage/nrcomp`.
 >   - Conda environment `nrcomp-codec`: Python 3.9, CompressAI 1.1.5, PyTorch with CUDA (runs Stage 1 sanity & Stage 2 data generation).
 >   - Conda environment `nrcomp-main`: Python 3.10, PyTorch with CUDA, PyIQA, PIQ, timm, pandas, pyarrow, CompressAI 1.1.5 with GNU C++ toolchain (`gxx_linux-64`). Runs Stage 3 labelling, Stage 4 training, and Stage 5 evaluation.
@@ -18,129 +19,103 @@
 
 ---
 
-## 2. Completed Milestones (M0 – M3)
+## 2. Integrity Ground Rules & Results Policy
 
-### Milestone M0: Scaffolding & Setup
-- Repository scaffolding, configuration files (`configs/`), conda setup script (`scripts/setup_conda_envs.sh`), and dataset download scripts (`scripts/download_datasets.py`).
-
-### Milestone M1: ELIC Integration & Kodak Sanity Gate (PASSED)
-- Weights downloaded and verified with SHA-256 (`weights/CHECKSUMS.txt`).
-- State dict updated via `scripts/download_weights.py` to `weights/updated/`.
-- 24 Kodak test images evaluated across all 6 lambdas:
-  - Bitrate strictly monotone: $0.0470 \to 0.0771 \to 0.1254 \to 0.1988 \to 0.5009 \to 0.8687$ bpp.
-  - PSNR strictly monotone: $26.10 \to 27.49 \to 28.95 \to 30.52 \to 34.47 \to 37.50$ dB.
-  - Latent bit-exactness: 20/20 bit-identical.
-  - Decode invertibility: `max_abs_diff = 0.000` (20/20).
-  - Channels verified: $M=320$ for $\hat{y}$, $N=192$ for $\hat{z}$.
-
-### Milestone M2: Pilot Generation & Labelling Gate (PASSED)
-- 100 KonIQ source images $\times$ 6 lambdas = 600 samples generated in `data/latents/koniq/` and labelled with HaarPSI, DISTS, and PSNR in `data/manifest_pilot.parquet`.
-- Diagnostic gates (`reports/label_diagnostics.md` & `reports/latent_diagnostics.md`):
-  - Non-monotone HaarPSI share: **0.0% (0/100 images)** vs $\le 10\%$ target (**PASS**).
-  - Ceiling clustering ($> 0.98$): **2.0% (12/600)** (**PASS**).
-  - Mean per-image Spearman(HaarPSI, $1 - \text{DISTS}$): **0.9983** vs $> 0.80$ target (**PASS**).
-  - Lambda predictability from pooled latent statistics: **77.00%** vs 16.67% random chance (**PASS**).
-
-### Milestone M3: Full Dataset Generation & Labelling Gate (PASSED)
-- Tailored for the 15 GB disk budget (`configs/generate_subset.yaml`):
-  - KonIQ-10k: 800 source images $\times 6 = 4,800$ samples (stratified 80/10/10 train/val/test across MOS quintiles).
-  - LiveC: 200 source images $\times 6 = 1,200$ samples (cross-content test set).
-  - Total: 1,000 images $\times 6$ lambdas = **6,000 samples**.
-- Data generation (`nrcomp.generate`) completed with **0 failures**.
-- Quality metric labelling (`nrcomp.label`) completed with on-the-fly GPU latent decoding.
-- Complete manifest stored at `data/manifest.parquet` (and mirrored to `data/manifest.csv`).
-- **Full Diagnostic Gate Results (`reports/label_diagnostics_full.md` & `reports/latent_diagnostics_full.md`):**
-  - **Non-monotone HaarPSI share:** **0.0% (0/1000 images)** vs $\le 10.0\%$ target (**PASS**).
-  - **Spearman(HaarPSI, 1 - DISTS) [Overall]:** **0.7235** vs $> 0.70$ target (**PASS**).
-  - **Spearman(HaarPSI, 1 - DISTS) [Mean Per-Image]:** **0.9980** vs $> 0.80$ target (**PASS**).
-  - **Lambda Predictor Accuracy:** **80.00%** vs 16.67% random chance baseline (**PASS**).
+1. **No Fabricated Numbers:** Never hardcode metric values, tables, "findings", or conclusions in code or reports. Every number in any report must be read dynamically from a verified run artifact (`metrics.json`, `predictions.parquet`) produced by an actual execution run. If an input artifact is missing, report generators must write `"NOT RUN"` or raise an error.
+2. **Mandatory Provenance Header:** Every generated report (`reports/*.md`) and run summary must begin with a complete provenance header containing Git SHA, config path and SHA-256, manifest path and SHA-256, lambdas config SHA-256, seed, timestamp, and input artifact paths.
+3. **Never Pool Splits:** Never pool validation, test, or cross-dataset samples. Report `koniq_val`, `koniq_test`, and `livec` separately everywhere.
+4. **No Tuning on Test Sets:** Model selection and hyperparameter tuning use `koniq_val` only. Test splits (`koniq_test`, `livec`) are evaluated strictly on final frozen checkpoints.
+5. **Single Source of Truth for Lambdas:** All scripts, configs, and reports read codec operating points exclusively from `configs/lambdas.yaml` via `nrcomp.lambdas`.
+6. **Codec Immutability:** Never edit `third_party/`. All wrappers and patches reside in `nrcomp/codec/wrapper.py`.
 
 ---
 
-## 3. Milestone M4: Student Model & Training Pipeline
+## 3. Milestone Progress Overview
 
-### Goal
-Train a lightweight convolutional student directly on quantized ELIC latents $\hat{y}$ (and optionally $\hat{z}$) to predict HaarPSI compression degradation $s \in (0, 1)$.
-
-### Architecture Specification (`nrcomp/model/`)
-```
-Latent Input y_hat (320 channels, shape B x 320 x H/16 x W/16)
-         |
-  [ ConvStem: Conv2d 1x1 -> 256, GroupNorm(32, 256) ]
-         |
-  [ Trunk: 6 ResBlocks at width 256 ]
-  Each block: Conv2d(3x3) -> GELU -> Conv2d(3x3) + Residual
-         |
-  +------+------+
-  |             |
-  v             v
-[ MaskedMeanPool ] [ MaskedAttentionPool ]
-  |             |
-  +------+------+
-         |
-    Concat (512)
-         |
-  [ MLP Head: Linear(512, 256) -> GELU -> Dropout(0.1) -> Linear(256, 1) -> Sigmoid ]
-         |
-    Scalar prediction s in (0, 1)
-```
-
-1. **`nrcomp/model/trunk.py`:**
-   - `ConvStem(in_channels=320, out_channels=256)`: 1x1 conv followed by `GroupNorm(32, 256)`.
-   - `ResBlock(channels=256)`: Two 3x3 convs with GELU and residual skip connection.
-   - `Trunk(depth=6, width=256)`: Sequential stack of 6 `ResBlock`s.
-2. **`nrcomp/model/pooling.py`:**
-   - `MaskedMeanPool`: Uses `valid_mask` to average only over unpadded spatial cells:
-     $$\text{pool}(F) = \frac{\sum_{h, w} F_{c, h, w} \cdot M_{h, w}}{\max(\sum_{h, w} M_{h, w}, 1)}$$
-   - `MaskedAttentionPool`: Learned query spatial attention over valid cells. Masked positions get $-\infty$ before softmax.
-   - Concatenates both poolings into a 512-dimensional vector.
-3. **`nrcomp/model/student.py`:**
-   - `LatentStudent`:
-     - **Config A (`y_hat` only):** 320 channels input.
-     - **Config B (`y_hat` + `z_hat`):** 192-channel stem for $\hat{z}$, $4\times$ nearest-neighbor upsample, concatenated with $\hat{y}$ stem features.
-     - **Blind Mode:** No lambda conditioning.
-     - **Conditioned Mode:** Learned lambda embedding $\mathbf{e}_\lambda \in \mathbb{R}^{256}$ added to trunk feature maps.
-4. **`nrcomp/model/loss.py`:**
-   - `CompositeLoss`:
-     $$\mathcal{L} = \text{SmoothL1}(s, y) + \alpha \mathcal{L}_{\text{rank}}$$
-     with $\alpha = 0.5$, where $\mathcal{L}_{\text{rank}}$ operates over all same-image pairs $(i, j)$ in the batch where $\lambda_i < \lambda_j$ and $y_j > y_i$:
-     $$\mathcal{L}_{\text{rank}} = \frac{1}{|P|} \sum_{(i, j) \in P} \text{ReLU}\big(0 - (s_j - s_i)\big)$$
-5. **`nrcomp/data/dataset.py`:**
-   - `LatentDataset`: Loads latents from `.npz` files using `LatentStore` and `manifest.parquet`.
-   - Collate function: Zero-pads batches to the maximum spatial dimensions in the batch and updates `valid_mask`.
-   - `SourceImageBatchSampler`: Samples $B=8$ source images and $k=3$ random lambdas per image (batch size $N = 24$), guaranteeing valid intra-image comparison pairs in every optimization step.
-6. **`nrcomp/train.py`:**
-   - CLI entry point: `python -m nrcomp.train --config configs/train_blind.yaml`
-   - Optimizer: AdamW ($3 \times 10^{-4}$, weight decay 0.05).
-   - Scheduler: Cosine annealing with 2 warmup epochs, 60 total epochs.
-   - Mixed precision: `torch.autocast('cuda', dtype=torch.bfloat16)`.
-   - Checkpoint selection: Best validation **within-lambda SROCC** averaged across all 6 lambdas.
-   - Output artifacts:
-     - `reports/training_{config}_history.csv`
-     - `reports/training_{config}_curves.png` (Loss curves, SROCC/PLCC curves, LR schedule)
-     - `weights/student_{config}_best.pt`
+| Milestone | Phase | Description | Status |
+| :--- | :--- | :--- | :--- |
+| **M0** | Scaffolding | Repo skeleton, environments, offline test suite | Complete |
+| **M1** | Codec Sanity | ELIC wrapper, bit-exact check (20/20 bit-identical) | Complete |
+| **M2** | Pilot | 100 KonIQ images $\times$ 6 lambdas pilot generation & diagnostics | Complete |
+| **M3** | Full Dataset | 1,000 images $\times$ 6 lambdas (6,000 samples) in `data/manifest.parquet` | Complete |
+| **M4** | Baselines & Config A | Baselines (a), (b), (c) + Student Config A (blind & conditioned) | Complete |
+| **M5** | Multi-Modal Config B | Student Config B ($\hat{y} + \hat{z}$); initial evaluation suite | UNVERIFIED (Report archived pending M7) |
+| **M6** | Pixel Refs & Protocol | Pixel student framework & human study protocol draft | UNVERIFIED (Report archived pending M7) |
+| **M7** | **Integrity Fixes** | **A1–A6 fixes: manifest audit, MOS backfill, lambda source of truth** | **READY FOR SERVER GATE** |
+| **M8** | Eval Stats & Teachers | B1–B8: Headline metrics, 95% bootstrap CIs, multi-seed aggregation | Next Phase |
+| **M9** | Stronger Baselines | C1–C5: Per-lambda bpp, global bpp+lambda, latent GBDT/Ridge | Planned |
+| **M10**| Ablations | D1–D5: A2–A10 architectural ablations, data-scaling, flip aug | Planned |
+| **M11**| Pixel Ref & Latency | E1–E3: Train real pixel CNN student, real hardware latency | Planned |
+| **M12**| Synthesis | F1–F4: Paper-ready figures, final synthesis report, signoff | Planned |
 
 ---
 
-## 4. Key CLI Commands Reference
+## 4. Phase A (Milestone M7) Completed Work
 
+- **A1. Removed Hardcoded Results:**
+  - Rewrote `nrcomp/eval_pixel_refs.py` to parse only verified run artifacts in `reports/runs/{run_name}/metrics.json` or write `"NOT RUN"`.
+  - Added guard unit test `tests/unit/test_no_hardcoded_reports.py` that fails if any report generator contains numeric-literal metric tables.
+  - Archived previous unverified report to `reports/archive/eval_main_UNVERIFIED.md` with explicit warning banner.
+- **A2. Target Metric Registry & Directionality:**
+  - Implemented `nrcomp/labels/registry.py` with `MetricSpec` supporting higher-better standardization (transforms like `one_minus` for DISTS and bounds clipping).
+  - Updated `nrcomp/data/dataset.py` and `nrcomp/train.py` to log target metric and transform in `run_meta.json`.
+  - Added unit test `tests/unit/test_metric_registry.py`.
+- **A3. Manifest Audit & MOS Backfill:**
+  - Created `scripts/backfill_mos.py`: Non-destructively updates `orig_mos` and `split` in `data/manifest.parquet` from KonIQ scores CSV and LiveC labels without regenerating latents, and drops duplicate `bpp_est`.
+  - Created `scripts/audit_manifest.py`: Validates zero nulls, non-zero variance of `orig_mos`, presence of all 6 lambdas per image, no duplicates, valid latent files, and non-duplicate `bpp_est`. Exits with code 1 if any check fails.
+  - Fixed `nrcomp/generate.py` to prevent silent fallback to `(train, 0.0)`.
+- **A4. Strict Split Separation:**
+  - Rewrote `scripts/shortcut_baselines.py` to output separate sections and tables for `koniq_val`, `koniq_test`, and `livec_test`.
+  - Replaced silent fallback `{"y_hat": [0.0]}` with explicit `FileNotFoundError`.
+- **A5. Single Source of Truth for Lambdas:**
+  - Created `configs/lambdas.yaml` with verified ELIC operating points (`0.004, 0.008, 0.016, 0.032, 0.15, 0.45`).
+  - Implemented `nrcomp/lambdas.py` helper functions.
+  - Purged stale Cheng2020 anchor numbers (`0.0016..0.06`) across documentation and code.
+  - Added unit test `tests/unit/test_lambdas_single_source.py`.
+- **A6. Stale Documentation & Text Cleaned:**
+  - Removed unsupported "~0.75" baseline assertions and "saves dozens of milliseconds" claim from `nrcomp/evaluate.py`.
+  - Updated `design.md` to v3 with complete revision log and Section 8 additions.
+
+---
+
+## 5. GATE M7: Server Execution Instructions
+
+On the remote execution server (`/storage/nrcomp`), execute the following commands in order:
+
+### Step 1: Pull Latest Code
 ```bash
-# Environment activation on execution server:
+cd /storage/nrcomp
+git pull origin main
+```
+
+### Step 2: Backfill MOS & Audit Manifest
+```bash
+# Activate conda main environment
 conda activate nrcomp-main
 
-# Run Stage 3 Full Diagnostics:
-conda run --no-capture-output -n nrcomp-main python scripts/label_diagnostics.py --manifest data/manifest.parquet --output reports/label_diagnostics_full.md
-conda run --no-capture-output -n nrcomp-main python scripts/latent_diagnostics.py --manifest data/manifest.parquet --output reports/latent_diagnostics_full.md
+# Backfill true KonIQ and LiveC MOS into existing manifest
+python scripts/backfill_mos.py --manifest data/manifest.parquet
 
-# Train Blind Student (M4):
-conda run --no-capture-output -n nrcomp-main python -m nrcomp.train --config configs/train_blind.yaml
-
-# Train Conditioned Student (M4):
-conda run --no-capture-output -n nrcomp-main python -m nrcomp.train --config configs/train_conditioned.yaml
-
-# Train Config B Student (y_hat + z_hat) (M4):
-conda run --no-capture-output -n nrcomp-main python -m nrcomp.train --config configs/train_config_b.yaml
-
-# Run Unit Tests locally (Pure Python):
-python -m unittest discover tests/unit
+# Run integrity audit (must exit with returncode 0)
+python scripts/audit_manifest.py --manifest data/manifest.parquet
 ```
+
+### Step 3: Run Split-Separated Shortcut Baselines
+```bash
+python scripts/shortcut_baselines.py \
+  --manifest data/manifest.parquet \
+  --output reports/shortcut_baselines.md
+```
+
+### Step 4: Re-evaluate Existing Checkpoints for E3 MOS Verification
+```bash
+# Re-evaluate students on test splits to confirm non-zero orig_mos correlations in E3
+python -m nrcomp.evaluate \
+  --config configs/evaluate.yaml \
+  --output reports/eval_main.md
+```
+
+### Step 5: Confirm Gate Clearance
+Confirm that:
+1. `audit_manifest.py` prints `[SUCCESS] Manifest audit passed cleanly` and exits with code 0.
+2. In `reports/eval_main.md`, Section 3 (E3) shows non-zero, valid Spearman correlations with `orig_mos`.

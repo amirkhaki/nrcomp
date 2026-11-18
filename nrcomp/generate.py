@@ -19,15 +19,9 @@ from nrcomp.config import load_config
 from nrcomp.data.manifest import ParquetManifest
 from nrcomp.data.splits import create_or_load_koniq_splits
 from nrcomp.data.store import LatentStore, check_disk_space
+from nrcomp.lambdas import load_lambdas_config
 
-DEFAULT_LAMBDAS = [
-    {"idx": 0, "name": "0.004", "checkpoint": "elic_lambda_0.004_updated.pth.tar"},
-    {"idx": 1, "name": "0.008", "checkpoint": "elic_lambda_0.008_updated.pth.tar"},
-    {"idx": 2, "name": "0.016", "checkpoint": "elic_lambda_0.016_updated.pth.tar"},
-    {"idx": 3, "name": "0.032", "checkpoint": "elic_lambda_0.032_updated.pth.tar"},
-    {"idx": 4, "name": "0.15", "checkpoint": "elic_lambda_0.15_updated.pth.tar"},
-    {"idx": 5, "name": "0.45", "checkpoint": "elic_lambda_0.45_updated.pth.tar"},
-]
+DEFAULT_LAMBDAS = load_lambdas_config()
 
 
 def log_failure(failure_log_path: Path, dataset: str, image_id: str, lambda_idx: int, error_msg: str):
@@ -123,15 +117,17 @@ def collect_dataset_images(
                     with open(out_split_csv, "r", newline="") as f:
                         reader = csv.DictReader(f)
                         for row in reader:
-                            img_name = row.get("image_name", "")
-                            split_info[img_name] = (row.get("split", "train"), float(row.get("orig_mos", row.get("mos", 0.0))))
-                            split_info[Path(img_name).name] = (row.get("split", "train"), float(row.get("orig_mos", row.get("mos", 0.0))))
+                            img_name = row.get("image_id", row.get("image_name", ""))
+                            if not img_name:
+                                continue
+                            mos_val = float(row.get("orig_mos", row.get("mos", 0.0)))
+                            split_val = row.get("split", "train")
+                            split_info[img_name] = (split_val, mos_val)
+                            split_info[Path(img_name).name] = (split_val, mos_val)
                     if split_info:
                         break
                 except Exception:
                     pass
-
-    default_split = "test" if dataset_name == "livec" else "train"
 
     # Subsetting via max_images if specified in dataset config
     max_images = dataset_cfg.get("max_images")
@@ -140,7 +136,8 @@ def collect_dataset_images(
             from collections import defaultdict
             by_split = defaultdict(list)
             for p in all_img_paths:
-                s, _ = split_info.get(p.name, (default_split, 0.0))
+                info = split_info.get(p.name)
+                s = info[0] if info else ("test" if dataset_name == "livec" else "train")
                 by_split[s].append(p)
 
             selected_paths = []
@@ -156,7 +153,22 @@ def collect_dataset_images(
 
     records = []
     for img_path in all_img_paths:
-        split, mos = split_info.get(img_path.name, (default_split, 0.0))
+        if split_info:
+            if img_path.name in split_info:
+                split, mos = split_info[img_path.name]
+            else:
+                raise ValueError(
+                    f"Image '{img_path.name}' in dataset '{dataset_name}' not found in split/scores map! "
+                    f"Cannot default to 0.0 MOS (failed filename-to-MOS/split lookup)."
+                )
+        elif dataset_name in ("koniq", "livec"):
+            raise ValueError(
+                f"Missing split/scores metadata for '{dataset_name}' dataset. "
+                f"Ensure KonIQ/LiveC split CSV or scores file is provided."
+            )
+        else:
+            split = dataset_cfg.get("default_split", "train")
+            mos = float(dataset_cfg.get("default_mos", 0.0))
         records.append((dataset_name, img_path, split, mos))
 
     return records
@@ -336,7 +348,7 @@ def main():
                     "padded_height": padded_h,
                     "padded_width": padded_w,
                     "bpp_actual": bpp_actual,
-                    "bpp_est": bpp_actual,  # estimated bitrate placeholder
+                    "bpp_est": None,  # Dropped placeholder duplicate; set to None unless computed by entropy model
                     "psnr": None,
                     "haarpsi": None,
                     "dists": None,

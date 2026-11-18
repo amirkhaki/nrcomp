@@ -1,0 +1,33 @@
+# Single source of truth for ELIC codec lambda checkpoints and operating points
+# Verified from weights/updated checkpoints: elic_lambda_*.pth.tar
+lambdas:
+  - idx: 0
+    name: "0.004"
+    value: 0.004
+    checkpoint: "elic_lambda_0.004_updated.pth.tar"
+    raw_checkpoint: "elic_lambda_0.004.pth.tar"
+  - idx: 1
+    name: "0.008"
+    value: 0.008
+    checkpoint: "elic_lambda_0.008_updated.pth.tar"
+    raw_checkpoint: "elic_lambda_0.008.pth.tar"
+  - idx: 2
+    name: "0.016"
+    value: 0.016
+    checkpoint: "elic_lambda_0.016_updated.pth.tar"
+    raw_checkpoint: "elic_lambda_0.016.pth.tar"
+  - idx: 3
+    name: "0.032"
+    value: 0.032
+    checkpoint: "elic_lambda_0.032_updated.pth.tar"
+    raw_checkpoint: "elic_lambda_0.032.pth.tar"
+  - idx: 4
+    name: "0.15"
+    value: 0.15
+    checkpoint: "elic_lambda_0.15_updated.pth.tar"
+    raw_checkpoint: "elic_lambda_0.15.pth.tar"
+  - idx: 5
+    name: "0.45"
+    value: 0.45
+    checkpoint: "elic_lambda_0.45_updated.pth.tar"
+    raw_checkpoint: "elic_lambda_0.45.pth.tar"

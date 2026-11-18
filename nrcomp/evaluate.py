@@ -38,6 +38,7 @@ from nrcomp.baselines import (
 )
 from nrcomp.config import load_config
 from nrcomp.data.manifest import ParquetManifest
+from nrcomp.lambdas import load_lambdas_config
 from nrcomp.data.store import LatentStore
 
 try:
@@ -628,8 +629,11 @@ def format_markdown_report(
     lines.append("")
     lines.append("### E1 Per-Lambda SROCC Breakdown on KonIQ Test")
     lines.append("")
-    lines.append("| Model | Mean | $\\lambda_0$ (0.0016) | $\\lambda_1$ (0.0036) | $\\lambda_2$ (0.0075) | $\\lambda_3$ (0.015) | $\\lambda_4$ (0.03) | $\\lambda_5$ (0.06) |")
-    lines.append("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
+    lambda_items = load_lambdas_config()
+    header_cols = [f"$\\lambda_{{{item['idx']}}}$ ({item['name']})" for item in lambda_items]
+    lines.append("| Model | Mean | " + " | ".join(header_cols) + " |")
+    sep_cols = [":---:"] * (len(lambda_items) + 2)
+    lines.append("| " + " | ".join(sep_cols) + " |")
 
     for model_key, display_name in models_order:
         if model_key not in eval_results or "e1" not in eval_results[model_key]:
@@ -728,16 +732,15 @@ def format_markdown_report(
             lines.append(f"| **{display_name}** | {p_m} | {lat1} | {lat16} | {thp} |")
 
     lines.append("")
-    lines.append("> [!TIP]")
-    lines.append(r"> Running inference directly in the quantized latent domain completely eliminates the expensive neural decoder synthesis network ($\hat{y} \to \hat{x}$), saving dozens of milliseconds per frame.")
+    lines.append("> [!NOTE]")
+    lines.append(r"> Running inference directly in the quantized latent domain operates without executing the neural decoder synthesis network ($\hat{y} \to \hat{x}$). Comparative decoder synthesis latency will be benchmarked on GPU hardware in E8.")
     lines.append("")
     lines.append("---")
     lines.append("")
     lines.append("## 6. Milestone Acceptance Assessment")
     lines.append("")
     lines.append("- [x] **Config B Evaluation:** Evaluated on test splits and compared against Config A.")
-    lines.append("- [x] **Baselines Beaten:** Student models achieve ~0.75 within-lambda SROCC, overwhelmingly beating Baseline (a) (-0.299) and Baseline (c) (0.426).")
-    lines.append("- [x] **E1 - E4 and E8 Generated:** All diagnostic tables populated from manifest data.")
+    lines.append("- [x] **E1 - E4 and E8 Generated:** All diagnostic tables populated from run artifacts.")
     lines.append("- [x] **No Tuning on Test Sets:** Evaluated strictly using frozen models and val-fitted logistic mapping.")
 
     return "\n".join(lines)
