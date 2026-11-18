@@ -75,6 +75,28 @@ class TestManifest(unittest.TestCase):
             self.assertEqual(len(new_manager), 1)
             self.assertEqual(float(new_manager.rows[0]["haarpsi"]), 0.92)
 
+            # Test write_all_rows
+            row2 = dict(self.sample_row)
+            row2["image_id"] = "1002.jpg"
+            manager.write_all_rows([self.sample_row, row2])
+            self.assertEqual(len(manager), 2)
+            reloaded = ManifestManager(manifest_file)
+            self.assertEqual(len(reloaded), 2)
+
+    def test_backfill_mos_lookup_helpers(self):
+        from scripts.backfill_mos import _index_mos_entry, _lookup_mos
+
+        m = {}
+        # Image saved as uppercase in CSV, query as lowercase
+        _index_mos_entry(m, "125792926.JPG", 72.5)
+        self.assertAlmostEqual(_lookup_mos(m, "125792926.jpg"), 72.5)
+        self.assertAlmostEqual(_lookup_mos(m, "125792926"), 72.5)
+
+        # Image saved with .bmp in CSV, query as .JPG or stem
+        _index_mos_entry(m, "113.bmp", 45.0)
+        self.assertAlmostEqual(_lookup_mos(m, "113.bmp"), 45.0)
+        self.assertAlmostEqual(_lookup_mos(m, "113"), 45.0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -212,6 +212,11 @@ class ManifestManager:
         """Return all rows in the manifest."""
         return self.rows
 
+    def write_all_rows(self, rows: List[Dict[str, Any]]):
+        """Replace all rows and atomically save."""
+        self.rows = list(rows)
+        self.save()
+
     def flush(self):
         """Alias for save."""
         self.save()
