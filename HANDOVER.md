@@ -42,7 +42,7 @@
 | **M5** | Multi-Modal Config B | Student Config B ($\hat{y} + \hat{z}$); initial evaluation suite | UNVERIFIED (Report archived pending M7) |
 | **M6** | Pixel Refs & Protocol | Pixel student framework & human study protocol draft | UNVERIFIED (Report archived pending M7) |
 | **M7** | **Integrity Fixes** | **A1–A6 fixes: manifest audit, MOS backfill, lambda source of truth** | **READY FOR SERVER GATE** |
-| **M8** | Eval Stats & Teachers | B1–B8: Headline metrics, 95% bootstrap CIs, multi-seed aggregation | Next Phase |
+| **M8** | **Eval Stats & Teachers** | **B1–B7: Headline metrics, PWRC, paired tests, teacher matrix, multi-seed agg** | **IMPLEMENTED (Ready for Server Run)** |
 | **M9** | Stronger Baselines | C1–C5: Per-lambda bpp, global bpp+lambda, latent GBDT/Ridge | Planned |
 | **M10**| Ablations | D1–D5: A2–A10 architectural ablations, data-scaling, flip aug | Planned |
 | **M11**| Pixel Ref & Latency | E1–E3: Train real pixel CNN student, real hardware latency | Planned |
@@ -50,7 +50,7 @@
 
 ---
 
-## 4. Phase A (Milestone M7) Completed Work
+## 4. Phase A (Milestone M7) & Phase B (Milestone M8) Completed Work
 
 - **A1. Removed Hardcoded Results:**
   - Rewrote `nrcomp/eval_pixel_refs.py` to parse only verified run artifacts in `reports/runs/{run_name}/metrics.json` or write `"NOT RUN"`.
@@ -75,10 +75,28 @@
 - **A6. Stale Documentation & Text Cleaned:**
   - Removed unsupported "~0.75" baseline assertions and "saves dozens of milliseconds" claim from `nrcomp/evaluate.py`.
   - Updated `design.md` to v3 with complete revision log and Section 8 additions.
+- **B1. Headline Metrics (Within-$\lambda$ SROCC, RMSE, Within-$\lambda$ Partial Spearman, PWRC & DS-AUC):**
+  - Updated `nrcomp/evaluate.py` to evaluate rank metrics on raw predictions and calibrate PLCC/RMSE via validation-fitted 4-parameter logistic mapping.
+  - Implemented `compute_within_lambda_partial_spearman(preds, targets, bpps, lambdas)` assessing degradation prediction controlling for bit expenditure at fixed $\lambda$.
+  - Implemented `compute_pwrc_within_lambda(preds, targets, lambdas)` evaluating concordance accuracy across threshold differences $T \in [0.00, 0.20]$ and computing Difference-Scaled Area Under the Curve (DS-AUC).
+- **B2. Statistical Uncertainty & Paired Hypothesis Tests:**
+  - Enhanced `compute_clustered_bootstrap_cis` to compute 95% bootstrap CIs clustered by source image for SROCC, PLCC, RMSE, within-$\lambda$ SROCC, and DS-AUC.
+  - Implemented `compute_paired_difference_test` performing image-clustered bootstrap hypothesis tests on model-vs-model differences with two-tailed p-values.
+- **B3. Multi-Seed Training Pipeline & Aggregator:**
+  - `nrcomp/train.py` supports arbitrary `--seed N` and logs run artifacts into `reports/runs/{config_name}_seed{N}/`.
+  - Created `scripts/aggregate_seeds.py` computing mean $\pm$ sample std across seeds, evaluating seed ensembles ($s_{ens} = \frac{1}{K}\sum s_k$), and generating `reports/seed_aggregation.md`.
+- **B4. Verified E3 Rerun:**
+  - Fully integrated Spearman and partial correlations with `orig_mos` and MAE across MOS tertiles in `nrcomp/evaluate.py`.
+- **B5. Teacher Agreement Matrix (E4):**
+  - Implemented `compute_teacher_agreement_matrix` generating overall and mean within-$\lambda$ cross-correlation matrices between HaarPSI, 1 - DISTS, PSNR, and bpp, highlighting the empirical content bias divergence.
+- **B6. Standardized Predictions Schema:**
+  - Implemented `save_standardized_predictions` writing `predictions.parquet` and mirrored `predictions.csv` with standard schema (`image_id`, `dataset`, `split`, `lambda_idx`, `lambda_value`, `y`, `s`, `mapped_pred`, `bpp`, `orig_mos`, `dists`) into each model's run directory.
+- **B7. Pre-Registered Teacher Decision Rule:**
+  - Formalized Section 10.4 in `design.md` explicitly defining primary teacher criteria, content-rate divergence expectations, symmetric DISTS student benchmarking, and human study arbitration.
 
 ---
 
-## 5. GATE M7: Server Execution Instructions
+## 5. GATE M7 & GATE M8: Server Execution Instructions
 
 On the remote execution server (`/storage/nrcomp`), execute the following commands in order:
 
@@ -88,7 +106,7 @@ cd /storage/nrcomp
 git pull origin main
 ```
 
-### Step 2: Backfill MOS & Audit Manifest
+### Step 2: Backfill MOS & Audit Manifest (Gate M7)
 ```bash
 # Activate conda main environment
 conda activate nrcomp-main
@@ -96,8 +114,30 @@ conda activate nrcomp-main
 # Backfill true KonIQ and LiveC MOS into existing manifest
 python scripts/backfill_mos.py --manifest data/manifest.parquet
 
-# Run integrity audit (must exit with returncode 0)
+# Run integrity audit (must exit with returncode 0: [BACKFILL PASS])
 python scripts/audit_manifest.py --manifest data/manifest.parquet
+```
+
+### Step 3: Run Shortcut Baselines
+```bash
+python scripts/shortcut_baselines.py --manifest data/manifest.parquet --output reports/shortcut_baselines.md
+```
+
+### Step 4: Run Main Evaluation & Generate Verified Artifacts (Gate M8)
+```bash
+# Run comprehensive Stage 5 evaluation suite
+python -m nrcomp.evaluate --config configs/evaluate.yaml --output reports/eval_main.md
+```
+
+### Step 5: (Optional Multi-Seed Training & Aggregation)
+```bash
+# Train additional seeds (e.g. seeds 43 and 44) if desired:
+python -m nrcomp.train --config configs/student_blind_a.yaml --seed 43
+python -m nrcomp.train --config configs/student_blind_a.yaml --seed 44
+
+# Aggregate seeds:
+python scripts/aggregate_seeds.py --runs-dir reports/runs --models student_blind_a --seeds 42,43,44 --output reports/seed_aggregation.md
+```
 ```
 
 ### Step 3: Run Split-Separated Shortcut Baselines

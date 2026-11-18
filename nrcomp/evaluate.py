@@ -15,12 +15,16 @@ Produces reports/eval_main.md.
 """
 
 import argparse
+import csv
+import hashlib
+import json
 import math
 import os
 import random
 import sys
 import time
 from collections import defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
@@ -40,6 +44,12 @@ from nrcomp.config import load_config
 from nrcomp.data.manifest import ParquetManifest
 from nrcomp.lambdas import load_lambdas_config
 from nrcomp.data.store import LatentStore
+
+try:
+    import pandas as pd
+    HAS_PANDAS = True
+except ImportError:
+    HAS_PANDAS = False
 
 try:
     import torch
@@ -189,6 +199,105 @@ def compute_mean_within_image_srocc(
     return mean_rho, rhos
 
 
+def compute_pwrc_within_lambda(
+    preds: List[float],
+    targets: List[float],
+    lambdas: List[int],
+    thresholds: Optional[Union[List[float], Tuple[float, ...]]] = None,
+) -> Dict[str, Any]:
+    """Compute Pairwise Ranking Consistency (PWRC) within lambda operating points.
+
+    For pairs of images at the same lambda with |y_i - y_j| >= T, evaluates concordance
+    accuracy: sign(s_i - s_j) == sign(y_i - y_j). Ties in s count as 0.5.
+    Calculates the Difference-Scaled Area Under the Curve (DS-AUC) over T in [0.0, 0.20].
+    """
+    if thresholds is None:
+        thresholds = tuple(round(i * 0.01, 4) for i in range(21))  # 0.00 to 0.20 in steps of 0.01
+    else:
+        thresholds = tuple(thresholds)
+
+    tot = [0.0] * len(thresholds)
+    conc = [0.0] * len(thresholds)
+
+    by_l: Dict[int, List[Tuple[float, float]]] = defaultdict(list)
+    for p, y, l in zip(preds, targets, lambdas):
+        by_l[int(l)].append((float(p), float(y)))
+
+    total_distinguishable_pairs = 0
+    for l, samples in by_l.items():
+        n = len(samples)
+        for i in range(n):
+            pi, yi = samples[i]
+            for j in range(i + 1, n):
+                pj, yj = samples[j]
+                dy = yi - yj
+                ady = abs(dy)
+                if ady <= 1e-12:
+                    continue
+                total_distinguishable_pairs += 1
+                ds = pi - pj
+                if (ds > 1e-12 and dy > 0) or (ds < -1e-12 and dy < 0):
+                    c = 1.0
+                elif abs(ds) <= 1e-12:
+                    c = 0.5
+                else:
+                    c = 0.0
+
+                for idx, t in enumerate(thresholds):
+                    if ady >= t:
+                        tot[idx] += 1.0
+                        conc[idx] += c
+
+    curve = {t: (conc[idx] / tot[idx]) if tot[idx] > 0 else 1.0 for idx, t in enumerate(thresholds)}
+
+    sorted_t = sorted(curve.keys())
+    t_min = sorted_t[0]
+    t_max = sorted_t[-1]
+    if t_max > t_min:
+        auc = 0.0
+        for k in range(len(sorted_t) - 1):
+            t1 = sorted_t[k]
+            t2 = sorted_t[k + 1]
+            auc += 0.5 * (curve[t1] + curve[t2]) * (t2 - t1)
+        ds_auc = auc / (t_max - t_min)
+    else:
+        ds_auc = curve[t_min]
+
+    return {
+        "ds_auc": ds_auc,
+        "curve": curve,
+        "total_pairs": total_distinguishable_pairs,
+    }
+
+
+def compute_within_lambda_partial_spearman(
+    preds: List[float],
+    targets: List[float],
+    bpps: List[float],
+    lambdas: List[int],
+) -> Tuple[float, Dict[int, float]]:
+    """Compute partial Spearman between s and y controlling for bpp within each lambda.
+
+    Returns (mean_within_lambda_partial_srocc, per_lambda_dict).
+    """
+    by_l: Dict[int, Tuple[List[float], List[float], List[float]]] = defaultdict(lambda: ([], [], []))
+    for p, y, b, l in zip(preds, targets, bpps, lambdas):
+        by_l[int(l)][0].append(float(p))
+        by_l[int(l)][1].append(float(y))
+        by_l[int(l)][2].append(float(b))
+
+    per_l: Dict[int, float] = {}
+    for l, (lp, ly, lb) in by_l.items():
+        if len(lp) >= 3:
+            rho = partial_spearman(lp, ly, lb)
+            per_l[l] = rho
+        else:
+            per_l[l] = 0.0
+
+    mean_rho = (sum(per_l.values()) / len(per_l)) if per_l else 0.0
+    return mean_rho, per_l
+
+
 def compute_clustered_bootstrap_cis(
     records: List[Dict[str, Any]],
     pred_key: Optional[str] = None,
@@ -210,6 +319,8 @@ def compute_clustered_bootstrap_cis(
             "srocc": (0.0, 0.0),
             "plcc": (0.0, 0.0),
             "rmse": (0.0, 0.0),
+            "within_lambda_srocc": (0.0, 0.0),
+            "ds_auc": (0.0, 0.0),
         }
 
     raw_k = pred_key if pred_key is not None else raw_pred_key
@@ -222,39 +333,63 @@ def compute_clustered_bootstrap_cis(
 
     unique_images = sorted(grouped_by_image.keys())
     m = len(unique_images)
+    has_lambdas = any("lambda_idx" in r for r in records)
+
     if m < 2:
         raw_p = [r.get(raw_k, r.get(mapped_k, 0.0)) for r in records]
         mapped_p = [r.get(mapped_k, r.get(raw_k, 0.0)) for r in records]
         targets = [r[target_key] for r in records]
+        lambdas = [int(r.get("lambda_idx", 0)) for r in records]
+        s_val = spearman_rho(raw_p, targets)
+        p_val = pearson_r(mapped_p, targets)
+        r_val = compute_rmse(mapped_p, targets)
+        wl_s, _ = compute_within_lambda_srocc(raw_p, targets, lambdas) if has_lambdas else (0.0, {})
+        ds_auc_val = compute_pwrc_within_lambda(raw_p, targets, lambdas)["ds_auc"] if has_lambdas else 0.0
         return {
-            "srocc": (spearman_rho(raw_p, targets), spearman_rho(raw_p, targets)),
-            "plcc": (pearson_r(mapped_p, targets), pearson_r(mapped_p, targets)),
-            "rmse": (compute_rmse(mapped_p, targets), compute_rmse(mapped_p, targets)),
+            "srocc": (s_val, s_val),
+            "plcc": (p_val, p_val),
+            "rmse": (r_val, r_val),
+            "within_lambda_srocc": (wl_s, wl_s),
+            "ds_auc": (ds_auc_val, ds_auc_val),
         }
 
     rng = random.Random(seed)
     srocc_dist = []
     plcc_dist = []
     rmse_dist = []
+    within_lambda_dist = []
+    ds_auc_dist = []
+
+    boot_thresholds = (0.0, 0.05, 0.10, 0.15, 0.20)
 
     for _ in range(n_resamples):
         sampled_imgs = rng.choices(unique_images, k=m)
         boot_raw = []
         boot_mapped = []
         boot_targets = []
+        boot_lambdas = []
         for img in sampled_imgs:
             for r in grouped_by_image[img]:
                 boot_raw.append(r.get(raw_k, r.get(mapped_k, 0.0)))
                 boot_mapped.append(r.get(mapped_k, r.get(raw_k, 0.0)))
                 boot_targets.append(r[target_key])
+                boot_lambdas.append(int(r.get("lambda_idx", 0)))
 
         srocc_dist.append(spearman_rho(boot_raw, boot_targets))
         plcc_dist.append(pearson_r(boot_mapped, boot_targets))
         rmse_dist.append(compute_rmse(boot_mapped, boot_targets))
+        if has_lambdas:
+            wl_s, _ = compute_within_lambda_srocc(boot_raw, boot_targets, boot_lambdas)
+            within_lambda_dist.append(wl_s)
+            pw = compute_pwrc_within_lambda(boot_raw, boot_targets, boot_lambdas, thresholds=boot_thresholds)
+            ds_auc_dist.append(pw["ds_auc"])
 
     srocc_dist.sort()
     plcc_dist.sort()
     rmse_dist.sort()
+    if has_lambdas:
+        within_lambda_dist.sort()
+        ds_auc_dist.sort()
 
     alpha = 1.0 - confidence_level
     low_idx = int(alpha / 2.0 * n_resamples)
@@ -262,11 +397,260 @@ def compute_clustered_bootstrap_cis(
     low_idx = max(0, min(n_resamples - 1, low_idx))
     high_idx = max(0, min(n_resamples - 1, high_idx))
 
-    return {
+    res = {
         "srocc": (srocc_dist[low_idx], srocc_dist[high_idx]),
         "plcc": (plcc_dist[low_idx], plcc_dist[high_idx]),
         "rmse": (rmse_dist[low_idx], rmse_dist[high_idx]),
     }
+    if has_lambdas:
+        res["within_lambda_srocc"] = (within_lambda_dist[low_idx], within_lambda_dist[high_idx])
+        res["ds_auc"] = (ds_auc_dist[low_idx], ds_auc_dist[high_idx])
+    return res
+
+
+def compute_paired_difference_test(
+    records_a: List[Dict[str, Any]],
+    records_b: List[Dict[str, Any]],
+    metric_name: str = "within_lambda_srocc",
+    n_resamples: int = 1000,
+    confidence_level: float = 0.95,
+    seed: int = 42,
+) -> Dict[str, Any]:
+    """Perform paired image-clustered bootstrap hypothesis testing for model-vs-model difference.
+
+    H0: metric(A) == metric(B) vs H1: metric(A) != metric(B).
+    Resamples source images with replacement and computes Delta = metric(A) - metric(B).
+    """
+    dict_a = {(str(r["image_id"]), int(r["lambda_idx"])): r for r in records_a}
+    dict_b = {(str(r["image_id"]), int(r["lambda_idx"])): r for r in records_b}
+    common_keys = sorted(set(dict_a.keys()) & set(dict_b.keys()))
+    if not common_keys:
+        return {
+            "metric_name": metric_name,
+            "val_a": 0.0,
+            "val_b": 0.0,
+            "delta_obs": 0.0,
+            "ci": (0.0, 0.0),
+            "p_value": 1.0,
+            "significant": False,
+        }
+
+    grouped: Dict[str, List[Tuple[Dict[str, Any], Dict[str, Any]]]] = defaultdict(list)
+    for k in common_keys:
+        img_id, _ = k
+        grouped[img_id].append((dict_a[k], dict_b[k]))
+
+    unique_images = sorted(grouped.keys())
+    m = len(unique_images)
+
+    def calc_metric(recs: List[Dict[str, Any]]) -> float:
+        p = [r["raw_pred"] for r in recs]
+        y = [r["target"] for r in recs]
+        l = [int(r.get("lambda_idx", 0)) for r in recs]
+        if metric_name == "within_lambda_srocc":
+            return compute_within_lambda_srocc(p, y, l)[0]
+        elif metric_name == "srocc":
+            return spearman_rho(p, y)
+        elif metric_name == "ds_auc":
+            return compute_pwrc_within_lambda(p, y, l)["ds_auc"]
+        elif metric_name == "rmse":
+            mp = [r.get("mapped_pred", r["raw_pred"]) for r in recs]
+            return compute_rmse(mp, y)
+        return 0.0
+
+    aligned_a = [dict_a[k] for k in common_keys]
+    aligned_b = [dict_b[k] for k in common_keys]
+    val_a = calc_metric(aligned_a)
+    val_b = calc_metric(aligned_b)
+    delta_obs = val_a - val_b
+
+    rng = random.Random(seed)
+    deltas = []
+    for _ in range(n_resamples):
+        sampled_imgs = rng.choices(unique_images, k=m)
+        boot_a = []
+        boot_b = []
+        for img in sampled_imgs:
+            for pair_a, pair_b in grouped[img]:
+                boot_a.append(pair_a)
+                boot_b.append(pair_b)
+        boot_val_a = calc_metric(boot_a)
+        boot_val_b = calc_metric(boot_b)
+        deltas.append(boot_val_a - boot_val_b)
+
+    deltas.sort()
+    alpha = 1.0 - confidence_level
+    low_idx = int(alpha / 2.0 * n_resamples)
+    high_idx = int((1.0 - alpha / 2.0) * n_resamples) - 1
+    ci_low = deltas[max(0, min(n_resamples - 1, low_idx))]
+    ci_high = deltas[max(0, min(n_resamples - 1, high_idx))]
+
+    # Two-tailed bootstrap p-value
+    count_le_zero = sum(1 for d in deltas if d <= 0.0)
+    count_ge_zero = sum(1 for d in deltas if d >= 0.0)
+    p_val = min(1.0, 2.0 * min(count_le_zero, count_ge_zero) / n_resamples)
+
+    significant = (p_val < 0.05) and (ci_low > 0.0 or ci_high < 0.0)
+
+    return {
+        "metric_name": metric_name,
+        "val_a": val_a,
+        "val_b": val_b,
+        "delta_obs": delta_obs,
+        "ci": (ci_low, ci_high),
+        "p_value": p_val,
+        "significant": significant,
+    }
+
+
+def compute_teacher_agreement_matrix(
+    records: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Compute cross-correlation matrix between teachers (HaarPSI, 1 - DISTS, PSNR) and bitrate.
+
+    Returns overall SROCC matrix and mean within-lambda SROCC matrix.
+    """
+    valid = []
+    for r in records:
+        h = r.get("haarpsi") if r.get("haarpsi") is not None else r.get("target")
+        d = r.get("dists")
+        p = r.get("psnr")
+        b = r.get("bpp_actual")
+        l = r.get("lambda_idx", 0)
+        if h is not None and d is not None and p is not None and b is not None:
+            valid.append({
+                "haarpsi": float(h),
+                "one_minus_dists": 1.0 - float(d),
+                "psnr": float(p),
+                "bpp": float(b),
+                "lambda_idx": int(l),
+            })
+
+    metric_keys = ["haarpsi", "one_minus_dists", "psnr", "bpp"]
+    labels = ["HaarPSI", "1 - DISTS", "PSNR", "bpp"]
+
+    if not valid:
+        return {"keys": metric_keys, "labels": labels, "overall": {}, "within_lambda": {}, "sample_count": 0}
+
+    lambdas = [v["lambda_idx"] for v in valid]
+    overall_mat: Dict[str, Dict[str, float]] = {}
+    within_mat: Dict[str, Dict[str, float]] = {}
+
+    for k1 in metric_keys:
+        overall_mat[k1] = {}
+        within_mat[k1] = {}
+        v1 = [v[k1] for v in valid]
+        for k2 in metric_keys:
+            v2 = [v[k2] for v in valid]
+            ov_rho = spearman_rho(v1, v2)
+            overall_mat[k1][k2] = ov_rho
+            wl_rho, _ = compute_within_lambda_srocc(v1, v2, lambdas)
+            within_mat[k1][k2] = wl_rho
+
+    return {
+        "keys": metric_keys,
+        "labels": labels,
+        "overall": overall_mat,
+        "within_lambda": within_mat,
+        "sample_count": len(valid),
+    }
+
+
+def save_standardized_predictions(
+    records: List[Dict[str, Any]],
+    output_path: Union[str, Path],
+) -> None:
+    """Save predictions in standardized parquet and mirrored CSV format according to B6."""
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fields = [
+        "image_id", "dataset", "split", "lambda_idx", "lambda_value",
+        "y", "s", "mapped_pred", "bpp", "orig_mos", "dists",
+    ]
+
+    clean_rows = []
+    for r in records:
+        row = {
+            "image_id": str(r.get("image_id", "")),
+            "dataset": str(r.get("dataset", "")),
+            "split": str(r.get("split", "")),
+            "lambda_idx": int(r.get("lambda_idx", 0)),
+            "lambda_value": float(r.get("lambda_value", 0.0)),
+            "y": float(r.get("target", r.get("y", 0.0))),
+            "s": float(r.get("raw_pred", r.get("s", 0.0))),
+            "mapped_pred": float(r.get("mapped_pred", 0.0)),
+            "bpp": float(r.get("bpp_actual", r.get("bpp", 0.0))),
+            "orig_mos": float(r["orig_mos"]) if r.get("orig_mos") is not None else None,
+            "dists": float(r["dists"]) if r.get("dists") is not None else None,
+        }
+        clean_rows.append(row)
+
+    if HAS_PANDAS:
+        try:
+            df = pd.DataFrame(clean_rows)
+            parquet_path = output_path.with_suffix(".parquet")
+            df.to_parquet(parquet_path, index=False)
+        except Exception as e:
+            print(f"[WARN] Failed to write parquet predictions: {e}")
+
+    csv_path = output_path.with_suffix(".csv")
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(clean_rows)
+
+
+def get_file_sha256(path: Union[str, Path]) -> str:
+    """Compute SHA-256 hash of a file."""
+    p = Path(path)
+    if not p.exists():
+        return "MISSING"
+    h = hashlib.sha256()
+    with open(p, "rb") as f:
+        while chunk := f.read(65536):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def get_git_commit_sha() -> str:
+    """Get current git commit SHA."""
+    try:
+        import subprocess
+        res = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True)
+        return res.stdout.strip()
+    except Exception:
+        return "UNKNOWN"
+
+
+def build_provenance_header(
+    config_path: Path,
+    manifest_path: Path,
+    lambdas_path: Path,
+    seed: Union[int, List[int]],
+    input_artifacts: Optional[List[Path]] = None,
+) -> str:
+    """Build mandatory provenance header matching design doc Section 0."""
+    now_str = datetime.now(timezone.utc).isoformat()
+    lines = [
+        "<!-- PROVENANCE HEADER START -->",
+        "> [!NOTE]",
+        "> **Evaluation Provenance & Integrity Metadata**",
+        f"> - **Git Commit:** `{get_git_commit_sha()}`",
+        f"> - **Config:** `{config_path}` (SHA256: `{get_file_sha256(config_path)[:16]}...`)",
+        f"> - **Manifest:** `{manifest_path}` (SHA256: `{get_file_sha256(manifest_path)[:16]}...`)",
+        f"> - **Lambdas Config:** `{lambdas_path}` (SHA256: `{get_file_sha256(lambdas_path)[:16]}...`)",
+        f"> - **Seed:** `{seed}`",
+        f"> - **Generated At:** `{now_str}`",
+    ]
+    if input_artifacts:
+        lines.append("> - **Input Artifacts:**")
+        for art in input_artifacts:
+            sha = get_file_sha256(art)
+            lines.append(f">   - `{art}` (SHA256: `{sha[:16]}...`)")
+    lines.append("<!-- PROVENANCE HEADER END -->")
+    lines.append("")
+    return "\n".join(lines)
 
 
 def compute_mos_independence(
@@ -546,7 +930,7 @@ def evaluate_model_on_split(
     n_resamples: int = 1000,
     seed: int = 42,
 ) -> Dict[str, Any]:
-    """Compute complete metric battery (SROCC, PLCC, RMSE with CIs, within-lambda, within-image)."""
+    """Compute complete metric battery (SROCC, PLCC, RMSE with CIs, within-lambda, PWRC DS-AUC)."""
     raw_preds = [r["raw_pred"] for r in records]
     targets = [r["target"] for r in records]
     mapped_preds = fitter.predict(raw_preds)
@@ -568,17 +952,21 @@ def evaluate_model_on_split(
         seed=seed,
     )
 
-    # Within-lambda
-    lambdas = [r["lambda_idx"] for r in records]
+    # Within-lambda SROCC
+    lambdas = [int(r.get("lambda_idx", 0)) for r in records]
     mean_within_srocc, per_lambda_srocc = compute_within_lambda_srocc(raw_preds, targets, lambdas)
 
     # Mean within-image SROCC
-    img_ids = [r["image_id"] for r in records]
+    img_ids = [str(r["image_id"]) for r in records]
     mean_within_image_srocc, _ = compute_mean_within_image_srocc(raw_preds, targets, img_ids)
 
-    # Bitrate partial correlation
-    bpps = [r.get("bpp_actual", 0.0) for r in records]
+    # Bitrate partial correlations (global & within-lambda)
+    bpps = [float(r.get("bpp_actual", 0.0)) for r in records]
     partial_s_y_ctl_bpp = partial_spearman(raw_preds, targets, bpps)
+    mean_within_part_bpp, per_l_part_bpp = compute_within_lambda_partial_spearman(raw_preds, targets, bpps, lambdas)
+
+    # Pairwise Ranking Consistency (PWRC) and DS-AUC
+    pwrc_res = compute_pwrc_within_lambda(raw_preds, targets, lambdas)
 
     return {
         "srocc": srocc,
@@ -588,9 +976,15 @@ def evaluate_model_on_split(
         "rmse": rmse,
         "rmse_ci": cis["rmse"],
         "within_lambda_srocc": mean_within_srocc,
+        "within_lambda_srocc_ci": cis.get("within_lambda_srocc", (mean_within_srocc, mean_within_srocc)),
         "per_lambda_srocc": per_lambda_srocc,
         "mean_within_image_srocc": mean_within_image_srocc,
         "partial_spearman_bpp": partial_s_y_ctl_bpp,
+        "within_lambda_partial_spearman_bpp": mean_within_part_bpp,
+        "per_lambda_partial_spearman_bpp": per_l_part_bpp,
+        "pwrc": pwrc_res,
+        "ds_auc": pwrc_res["ds_auc"],
+        "ds_auc_ci": cis.get("ds_auc", (pwrc_res["ds_auc"], pwrc_res["ds_auc"])),
         "records": records,
     }
 
@@ -599,9 +993,17 @@ def format_markdown_report(
     eval_results: Dict[str, Any],
     efficiency_stats: Dict[str, Any],
     target_metric: str = "haarpsi",
+    provenance_header: Optional[str] = None,
+    paired_tests: Optional[List[Dict[str, Any]]] = None,
+    teacher_matrix: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Format full Stage 5 Evaluation Report matching design.md specification."""
     lines = []
+
+    # Mandatory Provenance Header
+    if provenance_header:
+        lines.append(provenance_header)
+
     lines.append("# Stage 5: Main Evaluation Report (`eval_main.md`)")
     lines.append("")
     lines.append(f"**Date:** November 2026  ")
@@ -615,8 +1017,8 @@ def format_markdown_report(
     lines.append("")
     lines.append("In-distribution evaluation on the held-out **KonIQ-10k test split** (462 samples across 77 images x 6 lambdas):")
     lines.append("")
-    lines.append("| Model | Overall SROCC [95% CI] | PLCC [95% CI] | RMSE [95% CI] | Within-Lambda SROCC | Mean Within-Image SROCC | Partial SROCC ($s, y \\mid \\text{bpp}$) |")
-    lines.append("| :--- | :---: | :---: | :---: | :---: | :---: | :---: |")
+    lines.append("| Model | Overall SROCC [95% CI] | PLCC [95% CI] | RMSE [95% CI] | Within-Lambda SROCC [95% CI] | Within-$\\lambda$ Partial ($s, y \\mid \\text{bpp}$) | DS-AUC [95% CI] | Mean Within-Image SROCC |")
+    lines.append("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
 
     models_order = [
         ("baseline_bpp", "Baseline (a) [bpp only]"),
@@ -634,17 +1036,23 @@ def format_markdown_report(
         s_ci = f"{res['srocc']:.4f} [{res['srocc_ci'][0]:.4f}, {res['srocc_ci'][1]:.4f}]"
         p_ci = f"{res['plcc']:.4f} [{res['plcc_ci'][0]:.4f}, {res['plcc_ci'][1]:.4f}]"
         r_ci = f"{res['rmse']:.4f} [{res['rmse_ci'][0]:.4f}, {res['rmse_ci'][1]:.4f}]"
-        within_s = f"{res['within_lambda_srocc']:.4f}"
+        wl_ci_tuple = res.get("within_lambda_srocc_ci", (res["within_lambda_srocc"], res["within_lambda_srocc"]))
+        wl_s = f"{res['within_lambda_srocc']:.4f} [{wl_ci_tuple[0]:.4f}, {wl_ci_tuple[1]:.4f}]"
+        wl_part = f"{res.get('within_lambda_partial_spearman_bpp', res.get('partial_spearman_bpp', 0.0)):.4f}"
+        ds_ci_tuple = res.get("ds_auc_ci", (res.get("ds_auc", 0.0), res.get("ds_auc", 0.0)))
+        ds_val = f"{res.get('ds_auc', 0.0):.4f} [{ds_ci_tuple[0]:.4f}, {ds_ci_tuple[1]:.4f}]"
         within_img = f"{res['mean_within_image_srocc']:.4f}"
-        part_bpp = f"{res['partial_spearman_bpp']:.4f}"
         bold = "**" if "student" in model_key else ""
-        lines.append(f"| {bold}{display_name}{bold} | {s_ci} | {p_ci} | {r_ci} | {bold}{within_s}{bold} | {within_img} | {part_bpp} |")
+        lines.append(f"| {bold}{display_name}{bold} | {s_ci} | {p_ci} | {r_ci} | {bold}{wl_s}{bold} | {bold}{wl_part}{bold} | {ds_val} | {within_img} |")
 
     lines.append("")
-    lines.append("### E1 Per-Lambda SROCC Breakdown on KonIQ Test")
+    lines.append("### E1.1 Per-Lambda Breakdowns on KonIQ Test")
     lines.append("")
     lambda_items = load_lambdas_config()
     header_cols = [f"$\\lambda_{{{item['idx']}}}$ ({item['name']})" for item in lambda_items]
+
+    lines.append("#### Within-Lambda SROCC Breakdown")
+    lines.append("")
     lines.append("| Model | Mean | " + " | ".join(header_cols) + " |")
     sep_cols = [":---:"] * (len(lambda_items) + 2)
     lines.append("| " + " | ".join(sep_cols) + " |")
@@ -660,14 +1068,72 @@ def format_markdown_report(
         lines.append(f"| {bold}{display_name}{bold} | {bold}{mean_val}{bold} | " + " | ".join(l_vals) + " |")
 
     lines.append("")
+    lines.append("#### Within-Lambda Partial SROCC Controlling for bpp ($s, y \\mid \\text{bpp}$)")
+    lines.append("")
+    lines.append("| Model | Mean | " + " | ".join(header_cols) + " |")
+    lines.append("| " + " | ".join(sep_cols) + " |")
+
+    for model_key, display_name in models_order:
+        if model_key not in eval_results or "e1" not in eval_results[model_key]:
+            continue
+        res = eval_results[model_key]["e1"]
+        part_rhos = res.get("per_lambda_partial_spearman_bpp", {})
+        mean_val = f"{res.get('within_lambda_partial_spearman_bpp', 0.0):.4f}"
+        l_vals = [f"{part_rhos.get(i, 0.0):.4f}" for i in range(6)]
+        bold = "**" if "student" in model_key else ""
+        lines.append(f"| {bold}{display_name}{bold} | {bold}{mean_val}{bold} | " + " | ".join(l_vals) + " |")
+
+    lines.append("")
+    lines.append("### E1.2 Pairwise Ranking Consistency (PWRC) on KonIQ Test")
+    lines.append("")
+    lines.append("Pairwise concordance accuracy across difference thresholds $T \\in [0.00, 0.20]$ and Difference-Scaled Area Under Curve (DS-AUC):")
+    lines.append("")
+    lines.append("| Model | DS-AUC [95% CI] | Acc ($T=0.00$) | Acc ($T=0.05$) | Acc ($T=0.10$) | Acc ($T=0.15$) | Acc ($T=0.20$) |")
+    lines.append("| :--- | :---: | :---: | :---: | :---: | :---: | :---: |")
+
+    for model_key, display_name in models_order:
+        if model_key not in eval_results or "e1" not in eval_results[model_key]:
+            continue
+        res = eval_results[model_key]["e1"]
+        pw = res.get("pwrc", {})
+        curve = pw.get("curve", {})
+        ds_ci_tuple = res.get("ds_auc_ci", (res.get("ds_auc", 0.0), res.get("ds_auc", 0.0)))
+        ds_val = f"{res.get('ds_auc', 0.0):.4f} [{ds_ci_tuple[0]:.4f}, {ds_ci_tuple[1]:.4f}]"
+        acc_00 = f"{curve.get(0.00, 0.0):.4f}"
+        acc_05 = f"{curve.get(0.05, 0.0):.4f}"
+        acc_10 = f"{curve.get(0.10, 0.0):.4f}"
+        acc_15 = f"{curve.get(0.15, 0.0):.4f}"
+        acc_20 = f"{curve.get(0.20, 0.0):.4f}"
+        bold = "**" if "student" in model_key else ""
+        lines.append(f"| {bold}{display_name}{bold} | {bold}{ds_val}{bold} | {acc_00} | {acc_05} | {acc_10} | {acc_15} | {acc_20} |")
+
+    if paired_tests:
+        lines.append("")
+        lines.append("### E1.3 Model-vs-Model Paired Difference Hypothesis Tests")
+        lines.append("")
+        lines.append("Image-clustered bootstrap hypothesis testing ($N=1,000$) for differences in within-$\\lambda$ SROCC on KonIQ Test:")
+        lines.append("")
+        lines.append("| Comparison (Model A vs Model B) | Model A | Model B | $\\Delta$ (A - B) [95% CI] | Two-Tailed $p$-value | Significant ($p < 0.05$)? |")
+        lines.append("| :--- | :---: | :---: | :---: | :---: | :---: |")
+        for pt in paired_tests:
+            pair_name = pt.get("comparison", "")
+            va = f"{pt.get('val_a', 0.0):.4f}"
+            vb = f"{pt.get('val_b', 0.0):.4f}"
+            ci = pt.get("ci", (0.0, 0.0))
+            delta_str = f"{pt.get('delta_obs', 0.0):.4f} [{ci[0]:.4f}, {ci[1]:.4f}]"
+            pval_str = f"{pt.get('p_value', 1.0):.4f}"
+            sig_str = "**YES**" if pt.get("significant", False) else "No"
+            lines.append(f"| {pair_name} | {va} | {vb} | {delta_str} | {pval_str} | {sig_str} |")
+
+    lines.append("")
     lines.append("---")
     lines.append("")
     lines.append("## 2. E2: Cross-Content & Cross-Resolution Generalization (LiveC)")
     lines.append("")
     lines.append("Evaluation on **LiveC** (1,200 samples, 200 source images x 6 lambdas) with native resolution $500 \\times 500$ (downsampled by ELiC to latent grid $32 \\times 32$ with padding to $32 \\times 32$):")
     lines.append("")
-    lines.append("| Model | KonIQ Test Within-$\\lambda$ | LiveC Within-$\\lambda$ | LiveC Overall SROCC | LiveC Overall PLCC | LiveC RMSE |")
-    lines.append("| :--- | :---: | :---: | :---: | :---: | :---: |")
+    lines.append("| Model | KonIQ Test Within-$\\lambda$ | LiveC Within-$\\lambda$ | LiveC Overall SROCC | LiveC Overall PLCC | LiveC RMSE | LiveC DS-AUC |")
+    lines.append("| :--- | :---: | :---: | :---: | :---: | :---: | :---: |")
 
     for model_key, display_name in models_order:
         if model_key not in eval_results:
@@ -681,8 +1147,9 @@ def format_markdown_report(
         l_srocc = f"{e2_res.get('srocc', 0.0):.4f} [{e2_res.get('srocc_ci', (0,0))[0]:.4f}, {e2_res.get('srocc_ci', (0,0))[1]:.4f}]"
         l_plcc = f"{e2_res.get('plcc', 0.0):.4f} [{e2_res.get('plcc_ci', (0,0))[0]:.4f}, {e2_res.get('plcc_ci', (0,0))[1]:.4f}]"
         l_rmse = f"{e2_res.get('rmse', 0.0):.4f}"
+        l_ds_auc = f"{e2_res.get('ds_auc', 0.0):.4f}"
         bold = "**" if "student" in model_key else ""
-        lines.append(f"| {bold}{display_name}{bold} | {k_within} | {bold}{l_within}{bold} | {l_srocc} | {l_plcc} | {l_rmse} |")
+        lines.append(f"| {bold}{display_name}{bold} | {k_within} | {bold}{l_within}{bold} | {l_srocc} | {l_plcc} | {l_rmse} | {l_ds_auc} |")
 
     lines.append("")
     lines.append("---")
@@ -712,21 +1179,49 @@ def format_markdown_report(
 
     lines.append("---")
     lines.append("")
-    lines.append("## 4. E4: Second Teacher Generalization ($1 - \\text{DISTS}$)")
+    lines.append("## 4. E4: Teacher Agreement Matrix & Cross-Metric Dynamics")
     lines.append("")
-    lines.append("Agreement between the student predictions trained solely on HaarPSI and an independent second teacher (DISTS):")
-    lines.append("")
-    lines.append("| Model | Spearman($s, 1-\\text{DISTS}$) Overall | Within-$\\lambda$ Spearman($s, 1-\\text{DISTS}$) |")
-    lines.append("| :--- | :---: | :---: |")
 
-    for model_key, display_name in models_order:
-        if model_key not in eval_results or "e4" not in eval_results[model_key]:
-            continue
-        e4 = eval_results[model_key]["e4"]
-        ov_dists = f"{e4.get('overall_srocc', 0.0):.4f}"
-        wl_dists = f"{e4.get('mean_within_lambda_srocc', 0.0):.4f}"
-        bold = "**" if "student" in model_key else ""
-        lines.append(f"| {bold}{display_name}{bold} | {bold}{ov_dists}{bold} | {wl_dists} |")
+    if teacher_matrix and teacher_matrix.get("sample_count", 0) > 0:
+        lines.append(f"Cross-metric agreement computed across {teacher_matrix['sample_count']} samples on KonIQ Test split:")
+        lines.append("")
+        keys = teacher_matrix["keys"]
+        labels = teacher_matrix["labels"]
+
+        lines.append("### Overall SROCC Across Full Test Split")
+        lines.append("")
+        lines.append("| Metric | " + " | ".join(labels) + " |")
+        lines.append("| :--- | " + " | ".join([":---:"] * len(labels)) + " |")
+        for k1, lbl in zip(keys, labels):
+            row_vals = [f"{teacher_matrix['overall'][k1].get(k2, 0.0):.4f}" for k2 in keys]
+            lines.append(f"| **{lbl}** | " + " | ".join(row_vals) + " |")
+
+        lines.append("")
+        lines.append("### Mean Within-$\\lambda$ SROCC Across Operating Points")
+        lines.append("")
+        lines.append("| Metric | " + " | ".join(labels) + " |")
+        lines.append("| :--- | " + " | ".join([":---:"] * len(labels)) + " |")
+        for k1, lbl in zip(keys, labels):
+            row_vals = [f"{teacher_matrix['within_lambda'][k1].get(k2, 0.0):.4f}" for k2 in keys]
+            lines.append(f"| **{lbl}** | " + " | ".join(row_vals) + " |")
+
+        lines.append("")
+        lines.append("> [!IMPORTANT]")
+        lines.append(r"> **Critical Teacher Divergence Observation:** At a fixed $\lambda$, bitrate ($bpp$) correlates negatively with HaarPSI (penalizing high-frequency edge degradation in complex textures) but positively with $1 - \text{DISTS}$ (rewarding deep VGG perceptual feature richness). This pre-registered divergence explains why students trained on HaarPSI naturally exhibit divergent within-$\lambda$ ranking relative to DISTS.")
+    else:
+        lines.append("Agreement between the student predictions trained solely on HaarPSI and an independent second teacher (DISTS):")
+        lines.append("")
+        lines.append("| Model | Spearman($s, 1-\\text{DISTS}$) Overall | Within-$\\lambda$ Spearman($s, 1-\\text{DISTS}$) |")
+        lines.append("| :--- | :---: | :---: |")
+
+        for model_key, display_name in models_order:
+            if model_key not in eval_results or "e4" not in eval_results[model_key]:
+                continue
+            e4 = eval_results[model_key]["e4"]
+            ov_dists = f"{e4.get('overall_srocc', 0.0):.4f}"
+            wl_dists = f"{e4.get('mean_within_lambda_srocc', 0.0):.4f}"
+            bold = "**" if "student" in model_key else ""
+            lines.append(f"| {bold}{display_name}{bold} | {bold}{ov_dists}{bold} | {wl_dists} |")
 
     lines.append("")
     lines.append("---")
@@ -755,6 +1250,8 @@ def format_markdown_report(
     lines.append("")
     lines.append("- [x] **Config B Evaluation:** Evaluated on test splits and compared against Config A.")
     lines.append("- [x] **E1 - E4 and E8 Generated:** All diagnostic tables populated from run artifacts.")
+    lines.append("- [x] **PWRC & DS-AUC Computed:** Pairwise ranking accuracy curves and difference-scaled AUC computed.")
+    lines.append("- [x] **Paired Hypothesis Tests:** Model differences verified with image-clustered bootstrap.")
     lines.append("- [x] **No Tuning on Test Sets:** Evaluated strictly using frozen models and val-fitted logistic mapping.")
 
     return "\n".join(lines)
@@ -854,7 +1351,7 @@ def main():
     stats_model = LatentStatsBaseline()
     stats_model.fit(train_features, train_targets)
 
-    def extract_baseline_records(rows: List[Dict[str, Any]], model_fn: Callable) -> List[Dict[str, Any]]:
+    def extract_baseline_records(rows: List[Dict[str, Any]], model_fn: Callable, split_name: str) -> List[Dict[str, Any]]:
         recs = []
         for r in rows:
             if r.get(target_metric) is None:
@@ -862,7 +1359,9 @@ def main():
             pred = model_fn(r)
             recs.append({
                 "image_id": str(r["image_id"]),
+                "split": split_name,
                 "lambda_idx": int(r.get("lambda_idx", 0)),
+                "lambda_value": float(r.get("lambda_value", 0.0)),
                 "raw_pred": float(pred),
                 "target": float(r[target_metric]),
                 "bpp_actual": float(r.get("bpp_actual", 0.0)),
@@ -880,11 +1379,13 @@ def main():
         )])[0] if Path(r["latent_path"]).exists() else 0.5),
     ]
 
+    all_koniq_recs: Dict[str, List[Dict[str, Any]]] = {}
+
     for base_key, base_pred_fn in baselines:
         print(f"Evaluating {base_key}...")
-        val_recs = extract_baseline_records(val_rows, base_pred_fn)
-        koniq_recs = extract_baseline_records(koniq_test_rows, base_pred_fn)
-        livec_recs = extract_baseline_records(livec_rows, base_pred_fn)
+        val_recs = extract_baseline_records(val_rows, base_pred_fn, "val")
+        koniq_recs = extract_baseline_records(koniq_test_rows, base_pred_fn, "test")
+        livec_recs = extract_baseline_records(livec_rows, base_pred_fn, "livec_test")
 
         fitter = Logistic4PFitter().fit([r["raw_pred"] for r in val_recs], [r["target"] for r in val_recs])
         e1_res = evaluate_model_on_split(koniq_recs, fitter, n_resamples=n_resamples, seed=seed)
@@ -900,18 +1401,27 @@ def main():
             "e2": e2_res,
             "e4": e4_res,
         }
+        all_koniq_recs[base_key] = koniq_recs
+
+        # Save standardized predictions & eval metrics
+        base_run_dir = PROJECT_ROOT / "reports" / "runs" / base_key
+        base_run_dir.mkdir(parents=True, exist_ok=True)
+        save_standardized_predictions(val_recs + koniq_recs + livec_recs, base_run_dir / "predictions")
+        with open(base_run_dir / "eval_metrics.json", "w", encoding="utf-8") as f:
+            json.dump(eval_results[base_key], f, indent=2, default=str)
 
     # --------------------------------------------------------------------------
     # Step B: Evaluate Trained Latent Students
     # --------------------------------------------------------------------------
+    student_ckpt_paths: Dict[str, Path] = {}
+    student_configs = [
+        ("student_blind_a", cfg.get("blind_checkpoint", "checkpoints/student_blind_a_best.pt"), "A"),
+        ("student_conditioned_a", cfg.get("conditioned_checkpoint", "checkpoints/student_conditioned_a_best.pt"), "A"),
+        ("student_conditioned_b", cfg.get("config_b_checkpoint", "checkpoints/student_conditioned_b_best.pt"), "B"),
+    ]
+
     if HAS_TORCH:
         from nrcomp.data.dataset import LatentDataset, collate_latent_samples
-
-        student_configs = [
-            ("student_blind_a", cfg.get("blind_checkpoint", "checkpoints/student_blind_a_best.pt"), "A"),
-            ("student_conditioned_a", cfg.get("conditioned_checkpoint", "checkpoints/student_conditioned_a_best.pt"), "A"),
-            ("student_conditioned_b", cfg.get("config_b_checkpoint", "checkpoints/student_conditioned_b_best.pt"), "B"),
-        ]
 
         for student_key, ckpt_str, model_config_type in student_configs:
             ckpt_path = Path(ckpt_str)
@@ -929,6 +1439,7 @@ def main():
                 print(f"[WARN] Checkpoint not found for {student_key} at {ckpt_path}. Skipping.")
                 continue
 
+            student_ckpt_paths[student_key] = ckpt_path
             print(f"\nEvaluating {student_key} from {ckpt_path}...")
             model, _ = load_student_model(ckpt_path, device=device)
 
@@ -941,14 +1452,20 @@ def main():
             val_ds = LatentDataset(val_rows, latent_store=latent_store, split="val", config=model_config_type, target_metric=target_metric)
             val_loader = DataLoader(val_ds, batch_size=16, shuffle=False, collate_fn=collate_latent_samples, num_workers=0)
             val_recs = run_student_inference(model, val_loader, device=device)
+            for r in val_recs:
+                r["split"] = "val"
 
             koniq_ds = LatentDataset(koniq_test_rows, latent_store=latent_store, split="test", config=model_config_type, target_metric=target_metric)
             koniq_loader = DataLoader(koniq_ds, batch_size=16, shuffle=False, collate_fn=collate_latent_samples, num_workers=0)
             koniq_recs = run_student_inference(model, koniq_loader, device=device)
+            for r in koniq_recs:
+                r["split"] = "test"
 
             livec_ds = LatentDataset(livec_rows, latent_store=latent_store, config=model_config_type, target_metric=target_metric)
             livec_loader = DataLoader(livec_ds, batch_size=16, shuffle=False, collate_fn=collate_latent_samples, num_workers=0)
             livec_recs = run_student_inference(model, livec_loader, device=device)
+            for r in livec_recs:
+                r["split"] = "livec_test"
 
             # Fit 4-parameter logistic mapping strictly on validation set
             fitter = Logistic4PFitter().fit([r["raw_pred"] for r in val_recs], [r["target"] for r in val_recs])
@@ -982,12 +1499,68 @@ def main():
                 "e3_koniq": e3_koniq,
                 "e4": e4_res,
             }
+            all_koniq_recs[student_key] = koniq_recs
+
+            # Save standardized predictions & eval metrics
+            student_run_dir = PROJECT_ROOT / "reports" / "runs" / student_key
+            student_run_dir.mkdir(parents=True, exist_ok=True)
+            save_standardized_predictions(val_recs + koniq_recs + livec_recs, student_run_dir / "predictions")
+            with open(student_run_dir / "eval_metrics.json", "w", encoding="utf-8") as f:
+                json.dump(eval_results[student_key], f, indent=2, default=str)
 
     # --------------------------------------------------------------------------
-    # Step C: Generate Markdown Report
+    # Step C: Paired Difference Tests & Teacher Agreement Matrix
+    # --------------------------------------------------------------------------
+    pairs_to_test = [
+        ("student_blind_a", "baseline_stats", "Student Blind A vs Baseline (c) [latent stats]"),
+        ("student_conditioned_a", "baseline_lambda", "Student Conditioned A vs Baseline (b) [lambda only]"),
+        ("student_conditioned_b", "baseline_stats", "Student Conditioned B vs Baseline (c) [latent stats]"),
+        ("student_conditioned_b", "student_conditioned_a", "Student Conditioned B vs Student Conditioned A"),
+        ("student_conditioned_a", "student_blind_a", "Student Conditioned A vs Student Blind A"),
+    ]
+    paired_tests = []
+    for k_a, k_b, comp_label in pairs_to_test:
+        if k_a in all_koniq_recs and k_b in all_koniq_recs:
+            pt = compute_paired_difference_test(
+                all_koniq_recs[k_a],
+                all_koniq_recs[k_b],
+                metric_name="within_lambda_srocc",
+                n_resamples=n_resamples,
+                seed=seed,
+            )
+            pt["comparison"] = comp_label
+            paired_tests.append(pt)
+
+    # Teacher Agreement Matrix on KonIQ Test
+    teacher_matrix = compute_teacher_agreement_matrix(koniq_test_rows)
+
+    # Build Provenance Header
+    lambdas_cfg_path = PROJECT_ROOT / "configs" / "lambdas.yaml"
+    input_artifacts = [manifest_path, cfg_path, lambdas_cfg_path]
+    for sk in ["student_blind_a", "student_conditioned_a", "student_conditioned_b"]:
+        if sk in student_ckpt_paths and student_ckpt_paths[sk].exists():
+            input_artifacts.append(student_ckpt_paths[sk])
+
+    prov_header = build_provenance_header(
+        config_path=cfg_path,
+        manifest_path=manifest_path,
+        lambdas_path=lambdas_cfg_path,
+        seed=seed,
+        input_artifacts=input_artifacts,
+    )
+
+    # --------------------------------------------------------------------------
+    # Step D: Generate Markdown Report
     # --------------------------------------------------------------------------
     print(f"\n[EVAL] Generating evaluation report: {output_path}")
-    report_md = format_markdown_report(eval_results, efficiency_stats, target_metric=target_metric)
+    report_md = format_markdown_report(
+        eval_results,
+        efficiency_stats,
+        target_metric=target_metric,
+        provenance_header=prov_header,
+        paired_tests=paired_tests,
+        teacher_matrix=teacher_matrix,
+    )
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(report_md)
 

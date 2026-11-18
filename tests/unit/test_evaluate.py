@@ -9,13 +9,19 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from nrcomp.evaluate import (
     Logistic4PFitter,
+    build_provenance_header,
     compute_clustered_bootstrap_cis,
     compute_mean_within_image_srocc,
     compute_mos_independence,
+    compute_paired_difference_test,
+    compute_pwrc_within_lambda,
     compute_rmse,
     compute_second_teacher_agreement,
+    compute_teacher_agreement_matrix,
+    compute_within_lambda_partial_spearman,
     format_markdown_report,
     logistic_4p,
+    save_standardized_predictions,
 )
 
 
@@ -177,6 +183,103 @@ class TestEvaluateOracles(unittest.TestCase):
         self.assertIn("Within-Lambda SROCC", md)
         self.assertIn("Student Conditioned B", md)
         self.assertIn("4.25M", md)
+
+
+    def test_compute_pwrc_within_lambda_concordance_and_auc(self):
+        # Perfect concordance
+        preds_perf = [0.1, 0.5, 0.9, 0.2, 0.6, 0.8]
+        targets_perf = [0.1, 0.5, 0.9, 0.2, 0.6, 0.8]
+        lambdas = [0, 0, 0, 1, 1, 1]
+
+        res_perf = compute_pwrc_within_lambda(preds_perf, targets_perf, lambdas)
+        self.assertAlmostEqual(res_perf["ds_auc"], 1.0, places=4)
+        self.assertEqual(res_perf["curve"][0.0], 1.0)
+        self.assertEqual(res_perf["curve"][0.20], 1.0)
+
+        # Inverted concordance
+        preds_inv = [0.9, 0.5, 0.1, 0.8, 0.6, 0.2]
+        res_inv = compute_pwrc_within_lambda(preds_inv, targets_perf, lambdas)
+        self.assertAlmostEqual(res_inv["ds_auc"], 0.0, places=4)
+
+        # Constant predictions (neutral ties = 0.5)
+        preds_const = [0.5, 0.5, 0.5, 0.5, 0.5, 0.5]
+        res_const = compute_pwrc_within_lambda(preds_const, targets_perf, lambdas)
+        self.assertAlmostEqual(res_const["ds_auc"], 0.5, places=4)
+
+    def test_compute_within_lambda_partial_spearman(self):
+        # Lambda 0 & 1: positive correlation with y controlling for non-collinear bpp
+        preds = [0.1, 0.5, 0.9, 0.95, 0.2, 0.6, 0.8, 0.85]
+        targets = [0.15, 0.45, 0.85, 0.92, 0.25, 0.55, 0.75, 0.88]
+        bpps = [0.3, 0.1, 0.4, 0.2, 0.5, 0.2, 0.6, 0.3]
+        lambdas = [0, 0, 0, 0, 1, 1, 1, 1]
+
+        mean_rho, per_l = compute_within_lambda_partial_spearman(preds, targets, bpps, lambdas)
+        self.assertEqual(len(per_l), 2)
+        self.assertGreater(mean_rho, 0.9)
+
+    def test_compute_paired_difference_test(self):
+        records_a = [
+            {"image_id": "img1", "lambda_idx": 0, "raw_pred": 0.9, "target": 0.85},
+            {"image_id": "img1", "lambda_idx": 1, "raw_pred": 0.95, "target": 0.90},
+            {"image_id": "img2", "lambda_idx": 0, "raw_pred": 0.4, "target": 0.45},
+            {"image_id": "img2", "lambda_idx": 1, "raw_pred": 0.5, "target": 0.55},
+        ]
+        records_b = [
+            {"image_id": "img1", "lambda_idx": 0, "raw_pred": 0.1, "target": 0.85},
+            {"image_id": "img1", "lambda_idx": 1, "raw_pred": 0.2, "target": 0.90},
+            {"image_id": "img2", "lambda_idx": 0, "raw_pred": 0.9, "target": 0.45},
+            {"image_id": "img2", "lambda_idx": 1, "raw_pred": 0.8, "target": 0.55},
+        ]
+
+        res = compute_paired_difference_test(records_a, records_b, metric_name="srocc", n_resamples=50, seed=42)
+        self.assertIn("delta_obs", res)
+        self.assertIn("ci", res)
+        self.assertIn("p_value", res)
+        self.assertGreater(res["delta_obs"], 0.0)
+
+    def test_compute_teacher_agreement_matrix(self):
+        records = [
+            {"haarpsi": 0.8, "dists": 0.2, "psnr": 30.0, "bpp_actual": 0.15, "lambda_idx": 0},
+            {"haarpsi": 0.85, "dists": 0.15, "psnr": 32.0, "bpp_actual": 0.20, "lambda_idx": 0},
+            {"haarpsi": 0.9, "dists": 0.1, "psnr": 34.0, "bpp_actual": 0.25, "lambda_idx": 1},
+            {"haarpsi": 0.95, "dists": 0.05, "psnr": 36.0, "bpp_actual": 0.30, "lambda_idx": 1},
+        ]
+        mat = compute_teacher_agreement_matrix(records)
+        self.assertEqual(mat["sample_count"], 4)
+        self.assertIn("haarpsi", mat["overall"])
+        self.assertIn("one_minus_dists", mat["overall"]["haarpsi"])
+        self.assertAlmostEqual(mat["overall"]["haarpsi"]["one_minus_dists"], 1.0, places=4)
+
+    def test_save_standardized_predictions_and_provenance(self):
+        import tempfile
+        records = [
+            {
+                "image_id": "img_001",
+                "dataset": "koniq",
+                "split": "test",
+                "lambda_idx": 0,
+                "lambda_value": 0.004,
+                "target": 0.75,
+                "raw_pred": 0.74,
+                "mapped_pred": 0.745,
+                "bpp_actual": 0.12,
+                "orig_mos": 58.2,
+                "dists": 0.25,
+            }
+        ]
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            out_p = Path(tmp_dir) / "test_preds"
+            save_standardized_predictions(records, out_p)
+            self.assertTrue((out_p.with_suffix(".csv")).exists())
+
+            prov = build_provenance_header(
+                config_path=Path("configs/evaluate.yaml"),
+                manifest_path=Path("data/manifest.parquet"),
+                lambdas_path=Path("configs/lambdas.yaml"),
+                seed=42,
+            )
+            self.assertIn("PROVENANCE HEADER START", prov)
+            self.assertIn("Git Commit", prov)
 
 
 if __name__ == "__main__":

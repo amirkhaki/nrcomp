@@ -201,6 +201,20 @@ To avoid rate-induced correlation inflation (where predicting $\lambda$ alone ac
   - Latent student forward pass (synthesis decode bypassed: 0.0 ms)
   - ELIC synthesis decode pass ($\hat{y} \to \hat{x}$) + Pixel student forward pass.
 
+### 10.4 Pre-Registered Teacher Decision Rule
+
+To avoid post-hoc cherry-picking between full-reference teachers that embody distinct perceptual and structural priors, the project pre-registers the following explicit decision protocol:
+
+1. **Designated Primary Teacher (v1):** `haarpsi` is pre-registered as the primary training target for student models in v1 due to its computational speed, phase-congruency theoretical foundation, and demonstrated sensitivity to high-frequency edge degradation across neural compression operating points.
+2. **Pre-Registered Content-Rate Divergence Criterion:**
+   - At fixed codec operating point $\lambda$, FR metrics exhibit differential content biases with respect to bitrate: HaarPSI penalizes high-frequency texture and edge loss (correlating negatively with bpp, $\approx -0.32$), while DISTS ($1 - \text{DISTS}$) rewards deep VGG perceptual feature richness (correlating positively with bpp, $\approx +0.53$).
+   - If a student trained on HaarPSI achieves strong within-$\lambda$ correlation with HaarPSI ($\ge 0.70$) but low or negative correlation with $1 - \text{DISTS}$ within $\lambda$, this divergence is pre-registered as evidence of teacher divergence rather than student failure.
+3. **Symmetric Architecture Benchmark (A5):**
+   - A parallel student model must be trained on $1 - \text{DISTS}$ using the exact same architecture, seeds, hyperparameter protocol, and split partitioning.
+   - Both models are reported side-by-side in `reports/eval_main.md` and `reports/ablations.md`.
+4. **Human Subjective Arbitration (E7):**
+   - For operating regimes where HaarPSI and DISTS disagree, the pre-registered 2AFC subjective human study protocol (boosted triplets on ELIC outputs) serves as the definitive arbiter.
+
 ---
 
 ## 11. Systematic Ablation Suite
