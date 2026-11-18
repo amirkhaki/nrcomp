@@ -1,4 +1,4 @@
-.PHONY: setup-conda-envs setup-envs download-datasets download-weights test-unit test-server run-baselines train-blind train-conditioned train-config-b codec-sanity help
+.PHONY: setup-conda-envs setup-envs download-datasets download-weights test-unit test-server run-baselines train-blind train-conditioned train-config-b eval-main codec-sanity help
 
 help:
 	@echo "nrcomp execution targets:"
@@ -12,6 +12,7 @@ help:
 	@echo "  make train-blind        - Train Config A Blind Student"
 	@echo "  make train-conditioned  - Train Config A Conditioned Student"
 	@echo "  make train-config-b     - Train Config B (y_hat + z_hat) Student"
+	@echo "  make eval-main          - Run Stage 5 Evaluation (E1-E4, E5, E8) -> reports/eval_main.md"
 	@echo "  make codec-sanity       - Run Stage 1 Codec Sanity Gate on Kodak"
 
 setup-conda-envs:
@@ -62,6 +63,10 @@ train-conditioned:
 train-config-b:
 	conda run --no-capture-output -n nrcomp-main python -m nrcomp.train \
 		--config configs/train_config_b.yaml
+
+eval-main:
+	conda run --no-capture-output -n nrcomp-main python -m nrcomp.evaluate \
+		--config configs/evaluate.yaml
 
 codec-sanity:
 	@if command -v conda >/dev/null && conda info --envs | grep -q "nrcomp-codec"; then \

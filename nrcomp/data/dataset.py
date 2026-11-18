@@ -45,15 +45,19 @@ class LatentDataset(TorchDataset):
         split: Optional[str] = None,
         config: str = "A",
         target_metric: str = "haarpsi",
+        dataset_name: Optional[str] = None,
     ):
         self.latent_store = latent_store
         self.split = split
+        self.dataset_name = dataset_name
         self.config = config.upper()
         self.target_metric = target_metric
 
-        # Filter rows by split and target validity
+        # Filter rows by dataset, split, and target validity
         self.samples = []
         for r in rows:
+            if dataset_name is not None and r.get("dataset") != dataset_name:
+                continue
             if split is not None and r.get("split") != split:
                 continue
 
@@ -92,6 +96,11 @@ class LatentDataset(TorchDataset):
             "image_id": str(row["image_id"]),
             "lambda_idx": int(row["lambda_idx"]),
             "target": float(row[self.target_metric]),
+            "bpp_actual": float(row["bpp_actual"]) if row.get("bpp_actual") is not None else 0.0,
+            "orig_mos": float(row["orig_mos"]) if row.get("orig_mos") is not None else None,
+            "dists": float(row["dists"]) if row.get("dists") is not None else None,
+            "psnr": float(row["psnr"]) if row.get("psnr") is not None else None,
+            "dataset": str(row.get("dataset", "")),
         }
 
         if z_hat is not None:
@@ -291,6 +300,11 @@ def collate_latent_samples(batch_items: List[Dict[str, Any]]) -> Dict[str, Any]:
         "lambda_indices": torch.tensor(lambda_indices, dtype=torch.long)
         if has_torch
         else lambda_indices,
+        "bpp_actual": [item.get("bpp_actual", 0.0) for item in batch_items],
+        "orig_mos": [item.get("orig_mos") for item in batch_items],
+        "dists": [item.get("dists") for item in batch_items],
+        "psnr": [item.get("psnr") for item in batch_items],
+        "dataset": [item.get("dataset", "") for item in batch_items],
     }
 
     if has_z:
