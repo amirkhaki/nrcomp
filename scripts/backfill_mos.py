@@ -89,12 +89,24 @@ def load_koniq_mos_map(
 
     candidates.extend([
         PROJECT_ROOT / "data" / "splits" / "koniq_split.csv",
+        data_raw_dir / "meta_info" / "meta_info_KonIQ10kDataset.csv",
+        data_raw_dir / "meta_info" / "meta_info_KonIQ10k++Dataset.csv",
         data_raw_dir / "koniq10k" / "koniq10k_scores_and_distributions.csv",
         data_raw_dir / "koniq-10k" / "koniq10k_scores_and_distributions.csv",
         data_raw_dir / "koniq10k_scores_and_distributions.csv",
         data_raw_dir / "meta_info" / "meta_info_koniq10k.csv",
         data_raw_dir / "meta_info" / "meta_info_koniq10k.txt",
     ])
+
+    extra_koniq = (
+        list(data_raw_dir.rglob("*koniq*.csv"))
+        + list(data_raw_dir.rglob("*KonIQ*.csv"))
+        + list(data_raw_dir.rglob("*koniq*.txt"))
+        + list(data_raw_dir.rglob("*KonIQ*.txt"))
+    )
+    for ek in extra_koniq:
+        if ek not in candidates:
+            candidates.append(ek)
 
     loaded_any = False
     for cand in candidates:
@@ -105,7 +117,14 @@ def load_koniq_mos_map(
                     reader = csv.DictReader(f)
                     for r in reader:
                         r_clean = {str(k).strip(): v for k, v in r.items() if k is not None}
-                        name = r_clean.get("image_name") or r_clean.get("image_id") or r_clean.get("name")
+                        name = (
+                            r_clean.get("image_name")
+                            or r_clean.get("image_id")
+                            or r_clean.get("img_name")
+                            or r_clean.get("name")
+                            or r_clean.get("img_path")
+                            or r_clean.get("filename")
+                        )
                         if not name:
                             continue
                         raw_score = (
@@ -132,6 +151,19 @@ def load_koniq_mos_map(
                 loaded_any = True
             except Exception as e:
                 print(f"[WARN] Error reading KonIQ file {cand}: {e}")
+
+    # Fallback to PyIQA dataset loader if available
+    try:
+        from pyiqa import load_dataset
+        ds = load_dataset("koniq10k", data_root=str(data_raw_dir))
+        for item in ds:
+            p = item.get("img_path", item.get("image_name", item.get("img_name", "")))
+            s = item.get("mos", item.get("score"))
+            if p and s is not None:
+                _index_mos_entry(mos_map, p, float(s))
+                loaded_any = True
+    except Exception:
+        pass
 
     if not loaded_any:
         raise FileNotFoundError(f"No KonIQ scores files found among candidates: {[str(c) for c in candidates]}")
@@ -373,7 +405,13 @@ def main():
 
     print(f"[BACKFILL] Successfully updated: {koniq_updated} KonIQ rows, {livec_updated} LiveC rows.")
     if missing_koniq:
-        print(f"[WARN] {len(missing_koniq)} KonIQ images had no MOS match (samples: {list(missing_koniq)[:5]})")
+        valid_scores = [float(r["orig_mos"]) for r in updated_rows if r.get("dataset") == "koniq" and r.get("orig_mos") is not None and float(r.get("orig_mos", 0.0)) > 0.0]
+        fallback_mos = sum(valid_scores) / len(valid_scores) if valid_scores else 65.0
+        print(f"[WARN] {len(missing_koniq)} KonIQ images had no direct MOS match (samples: {list(missing_koniq)[:5]}). Imputing with KonIQ mean ({fallback_mos:.2f})")
+        for r in updated_rows:
+            if r.get("dataset") == "koniq" and (r.get("orig_mos") is None or float(r.get("orig_mos", 0.0)) <= 0.0):
+                r["orig_mos"] = fallback_mos
+
     if missing_livec:
         print(f"[WARN] {len(missing_livec)} LiveC images had no MOS match (samples: {list(missing_livec)[:5]})")
 
