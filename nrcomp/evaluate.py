@@ -110,7 +110,10 @@ class Logistic4PFitter:
         cov_sy = sum((x - mean_s) * (y_val - mean_y) for x, y_val in zip(s, y))
         slope = (cov_sy / var_s) if var_s > 1e-12 else 0.0
         intercept = mean_y - slope * mean_s
-        self.linear_fallback = (slope, intercept)
+        if var_s <= 1e-12 or abs(slope) <= 1e-12:
+            self.linear_fallback = (1.0, 0.0)
+        else:
+            self.linear_fallback = (slope, intercept)
 
         if not HAS_SCIPY or not HAS_NUMPY:
             return self
@@ -188,7 +191,9 @@ def compute_mean_within_image_srocc(
 
 def compute_clustered_bootstrap_cis(
     records: List[Dict[str, Any]],
-    pred_key: str = "mapped_pred",
+    pred_key: Optional[str] = None,
+    raw_pred_key: str = "raw_pred",
+    mapped_pred_key: str = "mapped_pred",
     target_key: str = "target",
     n_resamples: int = 1000,
     confidence_level: float = 0.95,
@@ -197,7 +202,8 @@ def compute_clustered_bootstrap_cis(
     """Compute 95% bootstrap confidence intervals clustered by source image_id.
 
     Resamples unique source images with replacement (keeping all 6 lambdas per
-    image intact) to respect intra-image clustering.
+    image intact) to respect intra-image clustering. SROCC uses raw predictions
+    for fitting-invariance; PLCC and RMSE use mapped predictions.
     """
     if not records:
         return {
@@ -205,6 +211,9 @@ def compute_clustered_bootstrap_cis(
             "plcc": (0.0, 0.0),
             "rmse": (0.0, 0.0),
         }
+
+    raw_k = pred_key if pred_key is not None else raw_pred_key
+    mapped_k = pred_key if pred_key is not None else mapped_pred_key
 
     # Group records by image_id
     grouped_by_image: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
@@ -214,12 +223,13 @@ def compute_clustered_bootstrap_cis(
     unique_images = sorted(grouped_by_image.keys())
     m = len(unique_images)
     if m < 2:
-        preds = [r[pred_key] for r in records]
+        raw_p = [r.get(raw_k, r.get(mapped_k, 0.0)) for r in records]
+        mapped_p = [r.get(mapped_k, r.get(raw_k, 0.0)) for r in records]
         targets = [r[target_key] for r in records]
         return {
-            "srocc": (spearman_rho(preds, targets), spearman_rho(preds, targets)),
-            "plcc": (pearson_r(preds, targets), pearson_r(preds, targets)),
-            "rmse": (compute_rmse(preds, targets), compute_rmse(preds, targets)),
+            "srocc": (spearman_rho(raw_p, targets), spearman_rho(raw_p, targets)),
+            "plcc": (pearson_r(mapped_p, targets), pearson_r(mapped_p, targets)),
+            "rmse": (compute_rmse(mapped_p, targets), compute_rmse(mapped_p, targets)),
         }
 
     rng = random.Random(seed)
@@ -229,16 +239,18 @@ def compute_clustered_bootstrap_cis(
 
     for _ in range(n_resamples):
         sampled_imgs = rng.choices(unique_images, k=m)
-        boot_preds = []
+        boot_raw = []
+        boot_mapped = []
         boot_targets = []
         for img in sampled_imgs:
             for r in grouped_by_image[img]:
-                boot_preds.append(r[pred_key])
+                boot_raw.append(r.get(raw_k, r.get(mapped_k, 0.0)))
+                boot_mapped.append(r.get(mapped_k, r.get(raw_k, 0.0)))
                 boot_targets.append(r[target_key])
 
-        srocc_dist.append(spearman_rho(boot_preds, boot_targets))
-        plcc_dist.append(pearson_r(boot_preds, boot_targets))
-        rmse_dist.append(compute_rmse(boot_preds, boot_targets))
+        srocc_dist.append(spearman_rho(boot_raw, boot_targets))
+        plcc_dist.append(pearson_r(boot_mapped, boot_targets))
+        rmse_dist.append(compute_rmse(boot_mapped, boot_targets))
 
     srocc_dist.sort()
     plcc_dist.sort()
@@ -541,14 +553,16 @@ def evaluate_model_on_split(
     for r, mp in zip(records, mapped_preds):
         r["mapped_pred"] = mp
 
-    srocc = spearman_rho(mapped_preds, targets)
+    # SROCC is rank-based and evaluated on raw predictions to be robust against curve-fitting issues
+    srocc = spearman_rho(raw_preds, targets)
     plcc = pearson_r(mapped_preds, targets)
     rmse = compute_rmse(mapped_preds, targets)
 
     # Clustered Bootstrap CIs
     cis = compute_clustered_bootstrap_cis(
         records,
-        pred_key="mapped_pred",
+        raw_pred_key="raw_pred",
+        mapped_pred_key="mapped_pred",
         target_key="target",
         n_resamples=n_resamples,
         seed=seed,
@@ -556,15 +570,15 @@ def evaluate_model_on_split(
 
     # Within-lambda
     lambdas = [r["lambda_idx"] for r in records]
-    mean_within_srocc, per_lambda_srocc = compute_within_lambda_srocc(mapped_preds, targets, lambdas)
+    mean_within_srocc, per_lambda_srocc = compute_within_lambda_srocc(raw_preds, targets, lambdas)
 
     # Mean within-image SROCC
     img_ids = [r["image_id"] for r in records]
-    mean_within_image_srocc, _ = compute_mean_within_image_srocc(mapped_preds, targets, img_ids)
+    mean_within_image_srocc, _ = compute_mean_within_image_srocc(raw_preds, targets, img_ids)
 
     # Bitrate partial correlation
     bpps = [r.get("bpp_actual", 0.0) for r in records]
-    partial_s_y_ctl_bpp = partial_spearman(mapped_preds, targets, bpps)
+    partial_s_y_ctl_bpp = partial_spearman(raw_preds, targets, bpps)
 
     return {
         "srocc": srocc,
