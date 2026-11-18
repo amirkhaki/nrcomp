@@ -75,13 +75,63 @@ def _lookup_mos(mos_map: Dict[str, float], img_id: str) -> Optional[float]:
     return None
 
 
+def load_mos_via_pyiqa(dataset_name: str, data_raw_dir: Path) -> Dict[str, float]:
+    """Load ground-truth MOS directly via PyIQA dataset loader (same as scripts/download_datasets.py)."""
+    mos_map: Dict[str, float] = {}
+    try:
+        from pyiqa import load_dataset
+        target_name = "koniq10k" if "koniq" in dataset_name.lower() else "livec"
+        print(f"[BACKFILL] Loading '{target_name}' via pyiqa.load_dataset (from {data_raw_dir})...")
+        ds = load_dataset(target_name, data_root=str(data_raw_dir))
+
+        # 1. Check data_infos (GeneralNRDataset parses metadata into data_infos)
+        if hasattr(ds, "data_infos") and ds.data_infos:
+            for item in ds.data_infos:
+                name = item.get("img_name") or item.get("image_name") or item.get("img_path") or item.get("name")
+                mos = item.get("mos") or item.get("MOS") or item.get("score")
+                if name and mos is not None:
+                    _index_mos_entry(mos_map, name, float(mos))
+
+        # 2. Check meta_info_file if data_infos didn't yield or as fallback
+        if hasattr(ds, "meta_info_file") and ds.meta_info_file and Path(ds.meta_info_file).exists():
+            try:
+                import pandas as pd
+                df = pd.read_csv(ds.meta_info_file)
+                for _, r in df.iterrows():
+                    name = r.get("img_name") or r.get("image_name") or r.get("img_path")
+                    mos = r.get("mos") or r.get("MOS") or r.get("score")
+                    if name and pd.notna(mos):
+                        _index_mos_entry(mos_map, name, float(mos))
+            except Exception:
+                pass
+
+        # 3. Item iteration fallback
+        if not mos_map and hasattr(ds, "__len__") and len(ds) > 0:
+            for i in range(len(ds)):
+                item = ds[i]
+                if isinstance(item, dict):
+                    name = item.get("img_name") or item.get("image_name") or item.get("img_path")
+                    mos = item.get("mos") or item.get("MOS")
+                    if name and mos is not None:
+                        _index_mos_entry(mos_map, name, float(mos))
+
+        if mos_map:
+            print(f"[BACKFILL] pyiqa.load_dataset successfully provided {len(mos_map)} keys for '{target_name}'.")
+    except Exception as e:
+        print(f"[BACKFILL] pyiqa loader note: {e}")
+    return mos_map
+
+
 def load_koniq_mos_map(
     scores_path: Optional[Path], data_raw_dir: Path
 ) -> Tuple[Dict[str, float], Dict[str, str]]:
     """Load KonIQ-10k MOS scores and generate deterministic 80/10/10 splits."""
     items: List[Tuple[str, float]] = []
-    mos_map: Dict[str, float] = {}
     split_map: Dict[str, str] = {}
+
+    # Primary: load via PyIQA dataset loader (same as scripts/download_datasets.py)
+    mos_map = load_mos_via_pyiqa("koniq10k", data_raw_dir)
+    loaded_any = len(mos_map) > 0
 
     candidates: List[Path] = []
     if scores_path:
@@ -97,18 +147,6 @@ def load_koniq_mos_map(
         data_raw_dir / "meta_info" / "meta_info_koniq10k.csv",
         data_raw_dir / "meta_info" / "meta_info_koniq10k.txt",
     ])
-
-    extra_koniq = (
-        list(data_raw_dir.rglob("*koniq*.csv"))
-        + list(data_raw_dir.rglob("*KonIQ*.csv"))
-        + list(data_raw_dir.rglob("*koniq*.txt"))
-        + list(data_raw_dir.rglob("*KonIQ*.txt"))
-    )
-    for ek in extra_koniq:
-        if ek not in candidates:
-            candidates.append(ek)
-
-    loaded_any = False
     for cand in candidates:
         if cand.exists():
             print(f"[BACKFILL] Loading KonIQ metadata from: {cand}")
@@ -181,7 +219,8 @@ def load_koniq_mos_map(
 
 def load_livec_mos_map(scores_path: Optional[Path], data_raw_dir: Path) -> Dict[str, float]:
     """Load LiveC (CLIVE) ground truth MOS scores from files or PyIQA fallback."""
-    mos_map: Dict[str, float] = {}
+    # Primary: load via PyIQA dataset loader (same as scripts/download_datasets.py)
+    mos_map = load_mos_via_pyiqa("livec", data_raw_dir)
 
     candidates: List[Path] = []
     if scores_path:
