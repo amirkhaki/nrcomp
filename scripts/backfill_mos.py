@@ -415,6 +415,33 @@ def main():
     if missing_livec:
         print(f"[WARN] {len(missing_livec)} LiveC images had no MOS match (samples: {list(missing_livec)[:5]})")
 
+    # Ensure KonIQ has valid 80/10/10 stratified train/val/test splits
+    koniq_splits_present = set(r.get("split") for r in updated_rows if r.get("dataset") == "koniq")
+    if not {"train", "val", "test"}.issubset(koniq_splits_present):
+        print(f"[BACKFILL] KonIQ splits incomplete ({koniq_splits_present}). Generating deterministic 80/10/10 stratified split...")
+        from nrcomp.data.splits import create_koniq_stratified_split, save_koniq_split_csv
+
+        koniq_images_dict: Dict[str, float] = {}
+        for r in updated_rows:
+            if r.get("dataset") == "koniq":
+                koniq_images_dict[Path(r.get("image_id", "")).name] = float(r.get("orig_mos", 50.0))
+
+        koniq_items = list(koniq_images_dict.items())
+        new_splits = create_koniq_stratified_split(koniq_items, train_ratio=0.8, val_ratio=0.1, test_ratio=0.1, seed=0)
+
+        for r in updated_rows:
+            if r.get("dataset") == "koniq":
+                img_name = Path(r.get("image_id", "")).name
+                if img_name in new_splits:
+                    r["split"] = new_splits[img_name]
+
+        out_split_csv = PROJECT_ROOT / "data" / "splits" / "koniq_split.csv"
+        try:
+            save_koniq_split_csv(new_splits, koniq_images_dict, out_split_csv)
+            print(f"[BACKFILL] Saved verified 80/10/10 split to {out_split_csv}")
+        except Exception as e:
+            print(f"[WARN] Could not write to {out_split_csv}: {e}")
+
     # 4. Atomic write back
     manifest.write_all_rows(updated_rows)
     print(f"[SUCCESS] Successfully updated manifest at {manifest_path}")
