@@ -89,6 +89,19 @@ class TestModelOracle(unittest.TestCase):
         )
         self.assertEqual(model.config, "B")
         self.assertEqual(model.lambda_mode, "conditioned")
+        self.assertTrue(model.use_mask)
+
+    def test_student_unmasked_config(self):
+        model = LatentStudent(
+            config="A",
+            in_channels_y=320,
+            width=256,
+            num_res_blocks=6,
+            lambda_mode="conditioned",
+            num_lambdas=6,
+            use_mask=False,
+        )
+        self.assertFalse(model.use_mask)
 
 
 if __name__ == "__main__":

@@ -216,6 +216,7 @@ def main():
     num_lambdas = int(model_cfg.get("num_lambdas", 6))
     lambda_embed_dim = int(model_cfg.get("lambda_embed_dim", 256))
     dropout = float(model_cfg.get("dropout", 0.1))
+    use_mask = bool(model_cfg.get("use_mask", True))
 
     # Loss parameters
     loss_cfg = cfg.get("loss", {})
@@ -321,6 +322,7 @@ def main():
         num_lambdas=num_lambdas,
         lambda_embed_dim=lambda_embed_dim,
         dropout=dropout,
+        use_mask=use_mask,
     )
     model.set_normalization(mean_y=mean_y, std_y=std_y, mean_z=mean_z, std_z=std_z)
     model = model.to(device)

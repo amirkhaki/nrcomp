@@ -57,6 +57,7 @@ class LatentStudent(BaseModule):
         num_lambdas: int = 6,
         lambda_embed_dim: Optional[int] = None,
         dropout: float = 0.1,
+        use_mask: bool = True,
     ):
         super().__init__()
         self.config = config.upper()
@@ -68,6 +69,7 @@ class LatentStudent(BaseModule):
         self.num_lambdas = num_lambdas
         self.lambda_embed_dim = lambda_embed_dim if lambda_embed_dim is not None else width
         self.dropout_rate = dropout
+        self.use_mask = use_mask
 
         # Normalization buffers
         if HAS_TORCH:
@@ -170,6 +172,9 @@ class LatentStudent(BaseModule):
     ) -> "torch.Tensor":
         if not HAS_TORCH:
             raise RuntimeError("PyTorch is required for LatentStudent forward pass.")
+
+        if not self.use_mask:
+            valid_mask = None
 
         # Ensure mask is formatted as (B, 1, H, W) float
         m_f32 = None
