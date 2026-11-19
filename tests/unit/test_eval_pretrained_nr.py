@@ -11,6 +11,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from scripts.eval_pretrained_nr import (
     DEFAULT_NR_MODELS,
     LOWER_BETTER_METRICS,
+    evaluate_split_records,
     format_report_markdown,
     resolve_recon_path,
 )
@@ -55,6 +56,27 @@ class TestEvalPretrainedNR(unittest.TestCase):
             row5 = {"dataset": "koniq", "lambda_idx": 5, "image_id": "nonexistent.jpg"}
             res5 = resolve_recon_path(row5, tmp)
             self.assertIsNone(res5)
+
+    def test_evaluate_split_records(self):
+        records = [
+            {
+                "image_id": f"img_{i}",
+                "lambda_idx": i % 3,
+                "aligned_score": float(i) * 0.1,
+                "target": float(i) * 0.15,
+                "bpp_actual": 0.5,
+                "orig_mos": 50.0 + i,
+            }
+            for i in range(15)
+        ]
+        res = evaluate_split_records(records, fitter=None, n_bootstrap=0)
+        self.assertEqual(res["n_samples"], 15)
+        self.assertEqual(res["n_images"], 15)
+        self.assertIn("within_lambda_srocc", res)
+        self.assertIn("ds_auc", res)
+        self.assertIn("pwrc", res)
+        self.assertIn("within_lambda_partial_spearman_bpp", res)
+        self.assertIn("per_lambda_partial_spearman_bpp", res)
 
     def test_format_report_markdown(self):
         prov = "> [!NOTE]\n> Provenance test header\n"

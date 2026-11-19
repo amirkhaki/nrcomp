@@ -187,8 +187,9 @@ def evaluate_split_records(
     # Rank metrics (uncalibrated raw predictions)
     mean_w_srocc, per_l_srocc = compute_within_lambda_srocc(preds, targets, lambdas)
     srocc = spearman_rho(preds, targets)
-    partial_bpp = compute_within_lambda_partial_spearman(preds, targets, bpps, lambdas)
-    pwrc_acc, ds_auc = compute_pwrc_within_lambda(preds, targets, lambdas)
+    wl_part_bpp, per_l_part_bpp = compute_within_lambda_partial_spearman(preds, targets, bpps, lambdas)
+    pw = compute_pwrc_within_lambda(preds, targets, lambdas)
+    ds_auc = pw.get("ds_auc")
 
     # Calibrated linear metrics (if validation fitter provided)
     if fitter is not None:
@@ -228,10 +229,18 @@ def evaluate_split_records(
 
     # E3: Independence from orig_mos
     e3_stats = {}
-    valid_mos_pairs = [(p, m, t) for p, m, t in zip(preds, mos_list, targets) if m is not None]
+    valid_mos_pairs = [m for m in mos_list if m is not None]
     if len(valid_mos_pairs) >= 10:
-        vp, vm, vt = zip(*valid_mos_pairs)
-        e3_stats = compute_mos_independence(list(vp), list(vm), list(vt))
+        try:
+            e3_stats = compute_mos_independence(
+                preds=preds,
+                targets=targets,
+                orig_mos_list=mos_list,
+                lambda_indices=lambdas,
+                mae_preds=mapped,
+            )
+        except Exception:
+            e3_stats = {}
 
     return {
         "n_samples": len(records),
@@ -239,7 +248,8 @@ def evaluate_split_records(
         "within_lambda_srocc": mean_w_srocc,
         "within_lambda_srocc_ci": list(ci_w_srocc),
         "per_lambda_srocc": {str(k): float(v) for k, v in per_l_srocc.items()},
-        "within_lambda_partial_spearman_bpp": partial_bpp,
+        "within_lambda_partial_spearman_bpp": wl_part_bpp,
+        "per_lambda_partial_spearman_bpp": {str(k): float(v) for k, v in per_l_part_bpp.items()},
         "srocc": srocc,
         "srocc_ci": list(ci_srocc),
         "plcc": plcc,
@@ -247,7 +257,7 @@ def evaluate_split_records(
         "rmse": rmse,
         "ds_auc": ds_auc,
         "ds_auc_ci": list(ci_ds_auc),
-        "pwrc_accuracy": {f"T_{k:.2f}": float(v) for k, v in pwrc_acc.items()},
+        "pwrc": pw,
         "e3_mos_independence": e3_stats,
     }
 
@@ -383,18 +393,20 @@ def format_report_markdown(
     for lat_name, lat_doc in latent_baselines.items():
         for split_key, split_title in [("koniq_test", "KonIQ test"), ("livec_test", "LiveC test")]:
             sp = (lat_doc.get("splits") or {}).get(split_key, {})
-            e3 = sp.get("e3_mos_independence") or {}
-            rho_mos = e3.get("rho_pred_mos") or e3.get("srocc_mos")
-            part_mos = e3.get("partial_pred_mos_given_y") or e3.get("partial_mos_given_target")
+            e3 = (sp.get("e3_mos_independence") or lat_doc.get("e3", {}).get(split_key, {})) or {}
+            overall = (e3.get("overall") if isinstance(e3, dict) else {}) or {}
+            rho_mos = overall.get("rho_s_mos") or e3.get("rho_s_mos") or e3.get("rho_pred_mos") or e3.get("srocc_mos") or e3.get("s_mos_partial_spearman")
+            part_mos = overall.get("partial_s_mos_given_y") or e3.get("partial_s_mos_given_y") or e3.get("partial_pred_mos_given_y") or e3.get("partial_mos_given_target") or e3.get("s_mos_partial_spearman")
             if rho_mos is not None:
                 lines.append(f"| **{runs.DISPLAY_NAMES.get(lat_name, lat_name)}** | {split_title} | {_fmt(rho_mos)} | **{_fmt(part_mos)}** | Pure degradation predictor |")
 
     for m_name, doc in results.items():
         for split_key, split_title in [("koniq_test", "KonIQ test"), ("livec_test", "LiveC test")]:
             sp = (doc.get("splits") or {}).get(split_key, {})
-            e3 = sp.get("e3_mos_independence") or {}
-            rho_mos = e3.get("rho_pred_mos")
-            part_mos = e3.get("partial_pred_mos_given_y")
+            e3 = (sp.get("e3_mos_independence") or sp.get("mos_independence")) or {}
+            overall = (e3.get("overall") if isinstance(e3, dict) else {}) or {}
+            rho_mos = overall.get("rho_s_mos") or e3.get("rho_s_mos") or e3.get("rho_pred_mos") or e3.get("s_mos_partial_spearman")
+            part_mos = overall.get("partial_s_mos_given_y") or e3.get("partial_s_mos_given_y") or e3.get("partial_pred_mos_given_y") or e3.get("s_mos_partial_spearman")
             if rho_mos is not None:
                 interp = "Confounded by source aesthetics" if abs(part_mos or 0) > 0.2 else "Moderate content bias"
                 lines.append(f"| Pretrained {m_name.upper()} | {split_title} | {_fmt(rho_mos)} | {_fmt(part_mos)} | {interp} |")
