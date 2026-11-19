@@ -1,4 +1,4 @@
-.PHONY: setup-conda-envs setup-envs download-datasets download-weights test-unit test-server run-baselines train-blind train-conditioned train-config-b train-unmasked train-no-rank train-pure-rank train-teacher-dists train-loss-l1 train-primary train-ablations train-all train-all-seeds retrain-all eval-main eval-refs codec-sanity help
+.PHONY: setup-conda-envs setup-envs download-datasets download-weights test-unit test-server run-baselines train-blind train-conditioned train-config-b train-unmasked train-no-rank train-pure-rank train-teacher-dists train-loss-l1 train-primary train-ablations train-all train-all-seeds retrain-all eval-main eval-refs eval-pretrained-nr codec-sanity help
 
 help:
 	@echo "nrcomp execution targets:"
@@ -24,6 +24,7 @@ help:
 	@echo "  make train-loss-l1      - Train Config A L1 / Huber Loss Ablation (A9)"
 	@echo "  make eval-main          - Run Stage 5 Evaluation (E1-E4, E5, E8) -> reports/eval_main.md"
 	@echo "  make eval-refs          - Run Stage 6 Pixel References & Ablations -> reports/eval_refs.md"
+	@echo "  make eval-pretrained-nr - Run Pretrained NR-IQA Baselines -> reports/eval_pretrained_nr.md"
 	@echo "  make codec-sanity       - Run Stage 1 Codec Sanity Gate on Kodak"
 
 setup-conda-envs:
@@ -203,6 +204,17 @@ eval-refs:
 		.venv-main/bin/python -m nrcomp.eval_pixel_refs --config configs/eval_refs.yaml; \
 	else \
 		python3 -m nrcomp.eval_pixel_refs --config configs/eval_refs.yaml; \
+	fi
+
+eval-pretrained-nr:
+	@if [ "$$CONDA_DEFAULT_ENV" = "nrcomp-main" ]; then \
+		python scripts/eval_pretrained_nr.py; \
+	elif command -v conda >/dev/null && conda info --envs | grep -q "nrcomp-main"; then \
+		conda run --no-capture-output -n nrcomp-main python scripts/eval_pretrained_nr.py; \
+	elif [ -d ".venv-main" ]; then \
+		.venv-main/bin/python scripts/eval_pretrained_nr.py; \
+	else \
+		python3 scripts/eval_pretrained_nr.py; \
 	fi
 
 codec-sanity:

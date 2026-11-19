@@ -278,7 +278,10 @@ def main():
 
     latent = load_run_artifact(runs.ensemble_name("conditioned_b"), runs_dir, strict=args.strict)
     pixel = load_run_artifact("pixel_student_conditioned", runs_dir, strict=False)
-    pretrained = {n: load_run_artifact(f"pretrained_{n}", runs_dir, strict=False) for n in ("clipiqa", "niqe", "musiq")}
+    pretrained = {
+        n: load_run_artifact(f"pretrained_{n}", runs_dir, strict=False)
+        for n in ("clipiqa", "musiq", "niqe", "brisque", "maniqa")
+    }
     latency_doc = load_run_artifact("latency_benchmark", runs_dir, strict=False)
     latency_stats = latency_doc.get("latency_stats") if latency_doc else None
 
