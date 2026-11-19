@@ -403,6 +403,71 @@ def format_report_markdown(
     return "\n".join(lines)
 
 
+def materialize_missing_recon(
+    r: Dict[str, Any],
+    project_root: Path,
+    decoder_state: Dict[str, Any],
+    device: Any,
+) -> Optional[Path]:
+    """Decode a missing reconstruction from latents and save to disk."""
+    lat_p_raw = r.get("latent_path")
+    if not lat_p_raw:
+        return None
+    lat_p = Path(lat_p_raw) if Path(lat_p_raw).is_absolute() else project_root / lat_p_raw
+    if not lat_p.exists():
+        return None
+
+    if "wrapper" not in decoder_state:
+        try:
+            from nrcomp.codec.wrapper import ELICWrapper
+            from nrcomp.data.store import LatentStore
+            from nrcomp.lambdas import load_lambdas_config
+
+            lambdas_cfg = load_lambdas_config()
+            ckpt_by_idx = {int(x["idx"]): x["checkpoint"] for x in lambdas_cfg}
+            weights_dir = project_root / "weights" / "updated"
+            decoder_state["wrapper"] = ELICWrapper(weights_dir=weights_dir, device=device)
+            decoder_state["latent_store"] = LatentStore()
+            decoder_state["ckpt_by_idx"] = ckpt_by_idx
+        except Exception as e:
+            decoder_state["wrapper"] = None
+            print(f"\n[WARN] Could not initialize ELIC decoder: {e}")
+            return None
+
+    wrapper = decoder_state.get("wrapper")
+    if wrapper is None:
+        return None
+
+    try:
+        import torch
+        from PIL import Image
+
+        latent_store = decoder_state["latent_store"]
+        ckpt_by_idx = decoder_state["ckpt_by_idx"]
+
+        lambda_idx = int(r["lambda_idx"])
+        if lambda_idx not in wrapper.models:
+            wrapper.load_model(lambda_idx, ckpt_by_idx[lambda_idx])
+
+        lat_data = latent_store.load_latents(lat_p)
+        meta = {
+            "original_size": (int(r["height"]), int(r["width"])),
+            "padded_size": (int(r["padded_height"]), int(r["padded_width"])),
+            "lambda_idx": lambda_idx,
+        }
+        recon_np = wrapper.decode_from_latents(torch.from_numpy(lat_data["y_hat"]).float(), meta)
+
+        ds_name = str(r.get("dataset", "koniq"))
+        stem = Path(r["image_id"]).stem
+        dest = project_root / "data" / "recons" / ds_name / f"lambda_{lambda_idx}" / f"{stem}.png"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        Image.fromarray(recon_np).save(dest, format="PNG")
+        return dest
+    except Exception as e:
+        print(f"\n[WARN] Failed decoding latent {lat_p}: {e}")
+        return None
+
+
 def main():
     parser = argparse.ArgumentParser(description="Evaluate Pretrained NR-IQA Models (pyiqa/piq) on Codec Reconstructions.")
     parser.add_argument("--manifest", type=str, default="data/manifest.parquet", help="Path to manifest parquet.")
@@ -420,6 +485,8 @@ def main():
     parser.add_argument("--bootstrap-resamples", type=int, default=500, help="Number of bootstrap resamples.")
     parser.add_argument("--update-eval-refs", action="store_true", default=True, help="Automatically update reports/eval_refs.md.")
     parser.add_argument("--limit", type=int, default=None, help="Limit samples for dry-run/smoke testing.")
+    parser.add_argument("--auto-decode", action="store_true", default=True, help="Auto-decode missing reconstructions from latents if not found on disk.")
+    parser.add_argument("--no-auto-decode", action="store_false", dest="auto_decode", help="Disable auto-decoding of missing reconstructions.")
     parser.add_argument("--list-models", action="store_true", help="List available NR models in pyiqa and exit.")
     args = parser.parse_args()
 
@@ -478,6 +545,9 @@ def main():
     }
 
     n_missing_recon = 0
+    n_auto_decoded = 0
+    decoder_state: Dict[str, Any] = {}
+
     for r in all_rows:
         ds_name = r.get("dataset")
         sp_name = r.get("split")
@@ -498,14 +568,22 @@ def main():
 
         recon_file = resolve_recon_path(r, PROJECT_ROOT)
         if recon_file is None or not recon_file.exists():
-            n_missing_recon += 1
-            continue
+            if args.auto_decode:
+                recon_file = materialize_missing_recon(r, PROJECT_ROOT, decoder_state, device)
+                if recon_file is not None and recon_file.exists():
+                    n_auto_decoded += 1
+            if recon_file is None or not recon_file.exists():
+                n_missing_recon += 1
+                continue
 
         row_item = dict(r)
         row_item["_resolved_recon_path"] = str(recon_file)
         row_item["_processed_target"] = prepare_target_value(float(target_raw), args.target_metric)
         row_item["_lambda_val"] = lambda_vals[int(r["lambda_idx"])] if int(r["lambda_idx"]) < len(lambda_vals) else 0.0
         valid_rows_by_split[split_key].append(row_item)
+
+    if n_auto_decoded > 0:
+        print(f"[DECODE] Auto-decoded {n_auto_decoded} missing reconstructions from quantized latents into data/recons/.")
 
     print(
         f"Reconstructions Found: koniq_val={len(valid_rows_by_split['koniq_val'])}, "
@@ -514,8 +592,9 @@ def main():
         f"(missing on disk: {n_missing_recon})"
     )
 
-    if len(valid_rows_by_split["koniq_test"]) == 0 or len(valid_rows_by_split["livec_test"]) == 0:
-        print("[ERROR] No valid reconstruction image files found for test splits. Cannot evaluate pixel models.")
+    total_valid = sum(len(v) for v in valid_rows_by_split.values())
+    if total_valid == 0:
+        print("[ERROR] No valid reconstruction image files found for any split. Cannot evaluate pixel models.")
         sys.exit(1)
 
     model_names = [m.strip().lower() for m in args.models.split(",") if m.strip()]
@@ -534,7 +613,11 @@ def main():
         t0 = time.time()
 
         for split_key in ["koniq_val", "koniq_test", "livec_test"]:
-            rows = valid_rows_by_split[split_key]
+            rows = valid_rows_by_split.get(split_key, [])
+            if not rows:
+                print(f"  [{split_key}] No reconstruction images available; skipping.")
+                records_by_split[split_key] = []
+                continue
             if args.limit:
                 rows = rows[:args.limit]
 
