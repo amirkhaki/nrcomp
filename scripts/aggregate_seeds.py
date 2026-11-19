@@ -187,7 +187,12 @@ def format_seed_aggregation_report(
             cells = []
             for metric, _ in METRICS:
                 st = agg["stats"][split][metric]
-                cells.append("n/a" if st["mean"] is None else f"{st['mean']:.4f} ± {st['std']:.4f}")
+                if st["mean"] is None:
+                    cells.append("n/a")
+                elif st["std"] is None:
+                    cells.append(f"{st['mean']:.4f}")
+                else:
+                    cells.append(f"{st['mean']:.4f} ± {st['std']:.4f}")
             lines.append(f"| {disp} | {len(agg['seeds_found'])} / {len(seeds)} | " + " | ".join(cells) + " |")
         lines.append("")
 

@@ -74,6 +74,14 @@ def _fmt(v: Any, nd: int = 4) -> str:
     return "n/a" if v is None else f"{v:.{nd}f}"
 
 
+def _seed_txt(mean: Optional[float], std: Optional[float], n: int) -> str:
+    if n == 0 or mean is None:
+        return NOT_RUN
+    if std is None:
+        return f"{_fmt(mean)} (n={n})"
+    return f"{_fmt(mean)} ± {_fmt(std)} (n={n})"
+
+
 def _split_metric(doc: Optional[Dict[str, Any]], split: str, metric: str) -> Optional[float]:
     if not doc or not isinstance(doc, dict):
         return None
@@ -222,8 +230,8 @@ def format_ablations_report(
             ra = _load_ensemble_records(var_m, split, runs_dir)
             rb = _load_ensemble_records(ref_m, split, runs_dir)
             for teacher in teachers:
-                v_txt = f"{_fmt(var_mean)} ± {_fmt(var_std)} (n={var_n})" if var_n > 0 else NOT_RUN
-                r_txt = f"{_fmt(ref_mean)} ± {_fmt(ref_std)} (n={ref_n})" if ref_n > 0 else NOT_RUN
+                v_txt = _seed_txt(var_mean, var_std, var_n)
+                r_txt = _seed_txt(ref_mean, ref_std, ref_n)
                 if ra is None or rb is None or var_n == 0 or ref_n == 0:
                     missing = [m for m, r in ((var_m, ra), (ref_m, rb)) if r is None]
                     lines.append(f"| **{aid}** | {runs.DISPLAY_NAMES.get(var_m, var_m)} | {runs.DISPLAY_NAMES.get(ref_m, ref_m)} | "
@@ -236,8 +244,8 @@ def format_ablations_report(
                     v_txt = r_txt = "see Δ"
                 else:
                     recs_a, recs_b = ra, rb
-                    v_txt = f"{_fmt(var_mean)} ± {_fmt(var_std)} (n={var_n})"
-                    r_txt = f"{_fmt(ref_mean)} ± {_fmt(ref_std)} (n={ref_n})"
+                    v_txt = _seed_txt(var_mean, var_std, var_n)
+                    r_txt = _seed_txt(ref_mean, ref_std, ref_n)
                 pt = compute_paired_difference_test(recs_a, recs_b, "within_lambda_srocc", n_resamples=n_resamples, seed=seed)
                 ci = pt["ci"]
                 delta_txt = (f"{_fmt(pt['delta_obs'])} [{_fmt(ci[0])}, {_fmt(ci[1])}]"
