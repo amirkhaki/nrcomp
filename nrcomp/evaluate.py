@@ -1157,6 +1157,8 @@ def main():
     import torch
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device.type == "cuda" and torch.cuda.get_device_capability(device)[0] < 7:
+        torch.backends.cudnn.enabled = False
     print(f"[EVAL] Stage 5 evaluation on {device}; models={models}; seeds={seeds}")
 
     ctx = build_context(cfg, cfg_path, manifest_path, args)

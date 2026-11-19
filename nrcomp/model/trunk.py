@@ -128,7 +128,16 @@ class ResBlock(BaseModule):
     ) -> "torch.Tensor":
         if not HAS_TORCH:
             raise RuntimeError("PyTorch is required for ResBlock forward pass.")
-        h = self.norm(self.dwconv(x))
+        try:
+            h = self.norm(self.dwconv(x))
+        except RuntimeError as e:
+            err_msg = str(e)
+            if "GET was unable to find an engine" in err_msg or "cuDNN" in err_msg:
+                import torch
+                torch.backends.cudnn.enabled = False
+                h = self.norm(self.dwconv(x))
+            else:
+                raise
         if self.film is not None:
             if cond is None:
                 raise ValueError("FiLM-enabled ResBlock requires a conditioning vector.")

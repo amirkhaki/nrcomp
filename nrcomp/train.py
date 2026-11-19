@@ -430,34 +430,40 @@ def main():
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     scheduler = build_cosine_scheduler_with_warmup(optimizer, warmup_epochs, epochs)
 
-    # Determine precision and autocast:
-    # Pascal (sm 6.x) and older GPUs do not support bf16 and cuDNN lacks engines for fp16 depthwise convs.
-    # On sm < 7.0 (e.g. GTX 1080 Ti), fall back to native fp32 for stability and performance.
+    # Determine precision, autocast, and cuDNN settings:
+    # On sm < 7.0 (pre-Volta, e.g. GTX 1080 Ti sm_61):
+    # 1. Hardware lacks native bf16 and Tensor Cores -> use full-precision FP32.
+    # 2. cuDNN v8/v9 engine selector lacks depthwise conv engines for sm_61 -> disable cuDNN to use native ATen CUDA kernels.
     cuda_cap = torch.cuda.get_device_capability(device) if device.type == "cuda" else (0, 0)
     use_autocast = False
     autocast_dtype = torch.float32
 
     if device.type == "cuda":
-        if precision == "bf16":
-            if hasattr(torch.cuda, "is_bf16_supported") and torch.cuda.is_bf16_supported():
+        if cuda_cap[0] < 7:
+            use_autocast = False
+            autocast_dtype = torch.float32
+            torch.backends.cudnn.enabled = False
+            print(
+                f"[DEVICE] Hardware sm_{cuda_cap[0]}.{cuda_cap[1]} (pre-Volta, e.g. GTX 1080 Ti): "
+                f"using native PyTorch CUDA conv kernels in FP32 (cuDNN disabled for depthwise conv stability)."
+            )
+        elif precision == "bf16":
+            has_native_bf16 = False
+            if cuda_cap[0] >= 8 and hasattr(torch.cuda, "is_bf16_supported"):
+                try:
+                    has_native_bf16 = torch.cuda.is_bf16_supported(including_emulation=False)
+                except TypeError:
+                    has_native_bf16 = torch.cuda.is_bf16_supported()
+            if has_native_bf16:
                 use_autocast = True
                 autocast_dtype = torch.bfloat16
-            elif cuda_cap[0] >= 7:
-                print(f"[DEVICE] Hardware sm_{cuda_cap[0]}{cuda_cap[1]} lacks bf16 support; falling back to fp16.")
+            else:
+                print(f"[DEVICE] Hardware sm_{cuda_cap[0]}.{cuda_cap[1]} lacks native bf16; falling back to fp16.")
                 use_autocast = True
                 autocast_dtype = torch.float16
-            else:
-                print(f"[DEVICE] Hardware sm_{cuda_cap[0]}{cuda_cap[1]} (pre-Volta) lacks bf16/fp16 depthwise conv engine; using fp32.")
-                use_autocast = False
-                autocast_dtype = torch.float32
         elif precision == "fp16":
-            if cuda_cap[0] >= 7:
-                use_autocast = True
-                autocast_dtype = torch.float16
-            else:
-                print(f"[DEVICE] Hardware sm_{cuda_cap[0]}{cuda_cap[1]} (pre-Volta) lacks fp16 depthwise conv engine; using fp32.")
-                use_autocast = False
-                autocast_dtype = torch.float32
+            use_autocast = True
+            autocast_dtype = torch.float16
         else:
             use_autocast = False
             autocast_dtype = torch.float32
