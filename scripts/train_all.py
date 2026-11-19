@@ -74,6 +74,13 @@ def main():
         help="Comma-separated list of random seeds (e.g., '42' or '42,43,44').",
     )
     parser.add_argument(
+        "--precision",
+        type=str,
+        default=None,
+        choices=["bf16", "fp16", "fp32", "float32"],
+        help="Override precision (e.g. fp32 for Pascal/GTX 1080 Ti GPUs).",
+    )
+    parser.add_argument(
         "--manifest",
         type=str,
         default="data/manifest.parquet",
@@ -140,6 +147,8 @@ def main():
         for seed in seeds:
             for cp in config_paths:
                 cmd = [sys.executable, "-m", "nrcomp.train", "--config", str(cp.relative_to(PROJECT_ROOT)), "--seed", str(seed)]
+                if args.precision:
+                    cmd.extend(["--precision", args.precision])
                 print(f"  {' '.join(cmd)}")
         if args.eval:
             print(f"  {sys.executable} -m nrcomp.evaluate --config configs/evaluate.yaml")
@@ -166,6 +175,8 @@ def main():
                 "--seed",
                 str(seed),
             ]
+            if args.precision:
+                cmd.extend(["--precision", args.precision])
 
             t0 = time.time()
             try:

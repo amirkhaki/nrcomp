@@ -271,6 +271,13 @@ def main():
     parser.add_argument("--manifest", type=str, default=None, help="Override manifest path.")
     parser.add_argument("--seed", type=int, default=None, help="Override random seed.")
     parser.add_argument(
+        "--precision",
+        type=str,
+        default=None,
+        choices=["bf16", "fp16", "fp32", "float32"],
+        help="Override precision (default: from config with GPU capability fallback).",
+    )
+    parser.add_argument(
         "--allow-small-data",
         action="store_true",
         help="Disable the minimum-split-size guard (smoke tests only; never for reported results).",
@@ -295,7 +302,7 @@ def main():
     lr = float(train_cfg["lr"])
     weight_decay = float(train_cfg["weight_decay"])
     grad_clip = float(train_cfg["grad_clip"])
-    precision = str(train_cfg["precision"])
+    precision = str(args.precision or train_cfg.get("precision", "fp32")).lower()
     num_workers = int(train_cfg["num_workers"])
     seed = int(args.seed if args.seed is not None else train_cfg.get("seed", 42))
 
@@ -423,12 +430,40 @@ def main():
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     scheduler = build_cosine_scheduler_with_warmup(optimizer, warmup_epochs, epochs)
 
-    use_autocast = (device.type == "cuda" and precision in ["bf16", "fp16"])
-    autocast_dtype = (
-        torch.bfloat16 if (precision == "bf16" and torch.cuda.is_bf16_supported()) else torch.float16
-    )
+    # Determine precision and autocast:
+    # Pascal (sm 6.x) and older GPUs do not support bf16 and cuDNN lacks engines for fp16 depthwise convs.
+    # On sm < 7.0 (e.g. GTX 1080 Ti), fall back to native fp32 for stability and performance.
+    cuda_cap = torch.cuda.get_device_capability(device) if device.type == "cuda" else (0, 0)
+    use_autocast = False
+    autocast_dtype = torch.float32
+
+    if device.type == "cuda":
+        if precision == "bf16":
+            if hasattr(torch.cuda, "is_bf16_supported") and torch.cuda.is_bf16_supported():
+                use_autocast = True
+                autocast_dtype = torch.bfloat16
+            elif cuda_cap[0] >= 7:
+                print(f"[DEVICE] Hardware sm_{cuda_cap[0]}{cuda_cap[1]} lacks bf16 support; falling back to fp16.")
+                use_autocast = True
+                autocast_dtype = torch.float16
+            else:
+                print(f"[DEVICE] Hardware sm_{cuda_cap[0]}{cuda_cap[1]} (pre-Volta) lacks bf16/fp16 depthwise conv engine; using fp32.")
+                use_autocast = False
+                autocast_dtype = torch.float32
+        elif precision == "fp16":
+            if cuda_cap[0] >= 7:
+                use_autocast = True
+                autocast_dtype = torch.float16
+            else:
+                print(f"[DEVICE] Hardware sm_{cuda_cap[0]}{cuda_cap[1]} (pre-Volta) lacks fp16 depthwise conv engine; using fp32.")
+                use_autocast = False
+                autocast_dtype = torch.float32
+        else:
+            use_autocast = False
+            autocast_dtype = torch.float32
+
     try:
-        scaler = torch.amp.GradScaler(device_type=device.type, enabled=(use_autocast and autocast_dtype == torch.float16))
+        scaler = torch.amp.GradScaler(device.type, enabled=(use_autocast and autocast_dtype == torch.float16))
     except (AttributeError, TypeError):
         scaler = torch.cuda.amp.GradScaler(enabled=(use_autocast and autocast_dtype == torch.float16))
 
@@ -457,11 +492,15 @@ def main():
     print(f"Starting training for up to {epochs} epochs ({n_params / 1e6:.2f}M parameters)...")
     start_time = time.time()
 
+    import contextlib
+
     def _autocast():
+        if not use_autocast:
+            return contextlib.nullcontext()
         try:
-            return torch.amp.autocast(device_type=device.type, enabled=use_autocast, dtype=autocast_dtype)
+            return torch.amp.autocast(device_type=device.type, enabled=True, dtype=autocast_dtype)
         except (AttributeError, TypeError):
-            return torch.cuda.amp.autocast(enabled=use_autocast, dtype=autocast_dtype)
+            return torch.cuda.amp.autocast(enabled=True, dtype=autocast_dtype)
 
     def _forward(batch):
         y_hat = batch["y_hat"].to(device, non_blocking=True).float()
