@@ -24,16 +24,19 @@ def load_lambdas_config(yaml_path: Optional[Union[str, Path]] = None) -> List[Di
     return sorted(lambdas, key=lambda x: int(x["idx"]))
 
 
-def get_lambda_names(yaml_path: Optional[Union[str, Path]] = None) -> List[str]:
+def get_lambda_names(yaml_path: Optional[Union[str, Path, List[Dict[str, Any]]]] = None) -> List[str]:
     """Get list of lambda names in order of lambda_idx."""
-    return [item["name"] for item in load_lambdas_config(yaml_path)]
+    items = yaml_path if isinstance(yaml_path, list) else load_lambdas_config(yaml_path)
+    return [item["name"] for item in items]
 
 
-def get_lambda_values(yaml_path: Optional[Union[str, Path]] = None) -> List[float]:
+def get_lambda_values(yaml_path: Optional[Union[str, Path, List[Dict[str, Any]]]] = None) -> List[float]:
     """Get list of numeric lambda values in order of lambda_idx."""
-    return [float(item["value"]) for item in load_lambdas_config(yaml_path)]
+    items = yaml_path if isinstance(yaml_path, list) else load_lambdas_config(yaml_path)
+    return [float(item["value"]) for item in items]
 
 
-def get_lambda_checkpoints(yaml_path: Optional[Union[str, Path]] = None) -> List[str]:
+def get_lambda_checkpoints(yaml_path: Optional[Union[str, Path, List[Dict[str, Any]]]] = None) -> List[str]:
     """Get list of updated checkpoint filenames in order of lambda_idx."""
-    return [item["checkpoint"] for item in load_lambdas_config(yaml_path)]
+    items = yaml_path if isinstance(yaml_path, list) else load_lambdas_config(yaml_path)
+    return [item["checkpoint"] for item in items]

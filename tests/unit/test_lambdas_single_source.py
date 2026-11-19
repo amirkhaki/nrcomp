@@ -25,6 +25,9 @@ class TestLambdasSingleSource(unittest.TestCase):
         # Verify values in order
         expected_values = [0.004, 0.008, 0.016, 0.032, 0.15, 0.45]
         self.assertEqual(get_lambda_values(), expected_values)
+        self.assertEqual(get_lambda_values(lambdas), expected_values)
+        self.assertEqual(get_lambda_names(lambdas), [item["name"] for item in lambdas])
+        self.assertEqual(get_lambda_checkpoints(lambdas), [item["checkpoint"] for item in lambdas])
 
         # Specifically verify 4th lambda value is 0.016 (not 0.0016)
         self.assertEqual(lambdas[2]["name"], "0.016")
