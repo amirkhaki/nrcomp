@@ -47,6 +47,74 @@ class TestSplits(unittest.TestCase):
         split2 = create_koniq_stratified_split(items, seed=0)
         self.assertEqual(split1, split2)
 
+    def test_audit_manifest_detects_unbalanced_splits(self):
+        import csv
+        import tempfile
+        from scripts.audit_manifest import audit_manifest
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "manifest.csv"
+
+            # Create an unbalanced manifest: 98 train, 1 val, 1 test
+            fieldnames = [
+                "dataset", "image_id", "lambda_idx", "lambda_value",
+                "bpp_actual", "bpp_est", "psnr", "haarpsi", "dists", "orig_mos",
+                "latent_path", "split", "height", "width"
+            ]
+            with open(csv_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                for i in range(100):
+                    sp = "train" if i < 98 else ("val" if i == 98 else "test")
+                    for l_idx in range(6):
+                        writer.writerow({
+                            "dataset": "koniq",
+                            "image_id": f"koniq_{i:03d}.jpg",
+                            "lambda_idx": l_idx,
+                            "lambda_value": 0.01 * (l_idx + 1),
+                            "bpp_actual": 0.1 * (l_idx + 1),
+                            "bpp_est": "",
+                            "psnr": 30.0 + l_idx,
+                            "haarpsi": 0.5 + 0.08 * l_idx,
+                            "dists": 0.3 - 0.04 * l_idx,
+                            "orig_mos": float(20 + i * 0.5),
+                            "latent_path": f"/dummy/koniq_{i:03d}_{l_idx}.pt",
+                            "split": sp,
+                            "height": 512,
+                            "width": 512,
+                        })
+
+            passed, errors = audit_manifest(csv_path, check_latents_exist=False)
+            self.assertFalse(passed)
+            self.assertTrue(any("invalid/unbalanced" in e for e in errors))
+
+            # Now test balanced manifest: 80 train, 10 val, 10 test
+            with open(csv_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                for i in range(100):
+                    sp = "train" if i < 80 else ("val" if i < 90 else "test")
+                    for l_idx in range(6):
+                        writer.writerow({
+                            "dataset": "koniq",
+                            "image_id": f"koniq_{i:03d}.jpg",
+                            "lambda_idx": l_idx,
+                            "lambda_value": 0.01 * (l_idx + 1),
+                            "bpp_actual": 0.1 * (l_idx + 1),
+                            "bpp_est": "",
+                            "psnr": 30.0 + l_idx,
+                            "haarpsi": 0.5 + 0.08 * l_idx,
+                            "dists": 0.3 - 0.04 * l_idx,
+                            "orig_mos": float(20 + i * 0.5),
+                            "latent_path": f"/dummy/koniq_{i:03d}_{l_idx}.pt",
+                            "split": sp,
+                            "height": 512,
+                            "width": 512,
+                        })
+
+            passed, errors = audit_manifest(csv_path, check_latents_exist=False)
+            self.assertTrue(passed, f"Expected pass, got errors: {errors}")
+
 
 if __name__ == "__main__":
     unittest.main()

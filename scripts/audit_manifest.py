@@ -80,10 +80,16 @@ def audit_manifest(
         # Bitrate check
         bpp_act = r.get("bpp_actual")
         bpp_est = r.get("bpp_est")
-        if bpp_act is not None:
-            bpp_actual_list.append(float(bpp_act))
-        if bpp_est is not None:
-            bpp_est_list.append(float(bpp_est))
+        if bpp_act is not None and str(bpp_act).strip() != "":
+            try:
+                bpp_actual_list.append(float(bpp_act))
+            except ValueError:
+                pass
+        if bpp_est is not None and str(bpp_est).strip() != "":
+            try:
+                bpp_est_list.append(float(bpp_est))
+            except ValueError:
+                pass
 
         # Check latent file existence
         if check_latents_exist:
@@ -139,6 +145,23 @@ def audit_manifest(
             missing_splits = required - splits_found
             if missing_splits:
                 errors.append(f"Dataset koniq is missing required splits: {missing_splits}")
+            else:
+                unique_imgs_by_split = {
+                    sp: len(set(r.get("image_id") for r in ds_rows if r.get("split") == sp))
+                    for sp in required
+                }
+                total_koniq_imgs = sum(unique_imgs_by_split.values())
+                if total_koniq_imgs > 0:
+                    train_pct = unique_imgs_by_split["train"] / total_koniq_imgs
+                    val_pct = unique_imgs_by_split["val"] / total_koniq_imgs
+                    test_pct = unique_imgs_by_split["test"] / total_koniq_imgs
+                    if train_pct < 0.60 or val_pct < 0.05 or test_pct < 0.05:
+                        errors.append(
+                            f"Dataset koniq split distribution is invalid/unbalanced: {unique_imgs_by_split} "
+                            f"(train={train_pct:.1%}, val={val_pct:.1%}, test={test_pct:.1%}). "
+                            f"Expected ~80% train, ~10% val, ~10% test across {total_koniq_imgs} unique images. "
+                            f"Run `python scripts/backfill_mos.py --force-split` to regenerate."
+                        )
         elif ds == "livec":
             if "test" not in splits_found:
                 errors.append(f"Dataset livec must have 'test' split (found: {splits_found})")

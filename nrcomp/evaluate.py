@@ -985,6 +985,9 @@ def evaluate_model_on_split(
         "pwrc": pwrc_res,
         "ds_auc": pwrc_res["ds_auc"],
         "ds_auc_ci": cis.get("ds_auc", (pwrc_res["ds_auc"], pwrc_res["ds_auc"])),
+        "n_samples": len(records),
+        "n_images": len(set(str(r.get("image_id", "")) for r in records)),
+        "n_lambdas": len(set(int(r.get("lambda_idx", 0)) for r in records)),
         "records": records,
     }
 
@@ -1015,7 +1018,16 @@ def format_markdown_report(
     lines.append("")
     lines.append("## 1. Executive Summary & Headline Results (E1)")
     lines.append("")
-    lines.append("In-distribution evaluation on the held-out **KonIQ-10k test split** (462 samples across 77 images x 6 lambdas):")
+
+    e1_sample = next((res["e1"] for res in eval_results.values() if isinstance(res, dict) and "e1" in res), None)
+    e1_n_samples = e1_sample.get("n_samples", 0) if e1_sample else 0
+    e1_n_images = e1_sample.get("n_images", 0) if e1_sample else 0
+    e1_n_lambdas = e1_sample.get("n_lambdas", 6) if e1_sample else 6
+
+    lines.append(
+        f"In-distribution evaluation on the held-out **KonIQ-10k test split** "
+        f"({e1_n_samples:,} samples across {e1_n_images:,} images x {e1_n_lambdas} lambdas):"
+    )
     lines.append("")
     lines.append("| Model | Overall SROCC [95% CI] | PLCC [95% CI] | RMSE [95% CI] | Within-Lambda SROCC [95% CI] | Within-$\\lambda$ Partial ($s, y \\mid \\text{bpp}$) | DS-AUC [95% CI] | Mean Within-Image SROCC |")
     lines.append("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
@@ -1130,7 +1142,16 @@ def format_markdown_report(
     lines.append("")
     lines.append("## 2. E2: Cross-Content & Cross-Resolution Generalization (LiveC)")
     lines.append("")
-    lines.append("Evaluation on **LiveC** (1,200 samples, 200 source images x 6 lambdas) with native resolution $500 \\times 500$ (downsampled by ELiC to latent grid $32 \\times 32$ with padding to $32 \\times 32$):")
+
+    e2_sample = next((res["e2"] for res in eval_results.values() if isinstance(res, dict) and "e2" in res), None)
+    e2_n_samples = e2_sample.get("n_samples", 0) if e2_sample else 0
+    e2_n_images = e2_sample.get("n_images", 0) if e2_sample else 0
+    e2_n_lambdas = e2_sample.get("n_lambdas", 6) if e2_sample else 6
+
+    lines.append(
+        f"Evaluation on **LiveC** ({e2_n_samples:,} samples across {e2_n_images:,} source images x {e2_n_lambdas} lambdas) "
+        f"with native resolution $500 \\times 500$ (downsampled by ELiC to latent grid $32 \\times 32$ with padding to $32 \\times 32$):"
+    )
     lines.append("")
     lines.append("| Model | KonIQ Test Within-$\\lambda$ | LiveC Within-$\\lambda$ | LiveC Overall SROCC | LiveC Overall PLCC | LiveC RMSE | LiveC DS-AUC |")
     lines.append("| :--- | :---: | :---: | :---: | :---: | :---: | :---: |")

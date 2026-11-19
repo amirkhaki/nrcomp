@@ -179,11 +179,14 @@ def load_koniq_mos_map(
                             _index_mos_entry(mos_map, name, score_f)
                             items.append((Path(name).name, score_f))
 
-                            sp = r_clean.get("split")
-                            if sp:
-                                split_map[name] = sp
-                                split_map[Path(name).name] = sp
-                                split_map[Path(name).stem.lower()] = sp
+                            # Only load precomputed splits from our dedicated project split file,
+                            # never from external/raw metadata files which may have arbitrary or unbalanced splits
+                            if cand == PROJECT_ROOT / "data" / "splits" / "koniq_split.csv":
+                                sp = r_clean.get("split")
+                                if sp:
+                                    split_map[name] = sp
+                                    split_map[Path(name).name] = sp
+                                    split_map[Path(name).stem.lower()] = sp
                         except ValueError:
                             continue
                 loaded_any = True
@@ -375,6 +378,7 @@ def main():
     parser.add_argument("--manifest", type=str, default="data/manifest.parquet", help="Manifest path to rewrite.")
     parser.add_argument("--koniq-scores", type=str, default=None, help="Path to KonIQ scores CSV.")
     parser.add_argument("--livec-scores", type=str, default=None, help="Path to LiveC scores file.")
+    parser.add_argument("--force-split", action="store_true", help="Force deterministic 80/10/10 stratified split regeneration for KonIQ.")
     args = parser.parse_args()
 
     manifest_path = Path(args.manifest)
@@ -454,18 +458,48 @@ def main():
     if missing_livec:
         print(f"[WARN] {len(missing_livec)} LiveC images had no MOS match (samples: {list(missing_livec)[:5]})")
 
-    # Ensure KonIQ has valid 80/10/10 stratified train/val/test splits
-    koniq_splits_present = set(r.get("split") for r in updated_rows if r.get("dataset") == "koniq")
-    if not {"train", "val", "test"}.issubset(koniq_splits_present):
-        print(f"[BACKFILL] KonIQ splits incomplete ({koniq_splits_present}). Generating deterministic 80/10/10 stratified split...")
+    # Ensure KonIQ has valid, balanced 80/10/10 stratified train/val/test splits
+    koniq_rows = [r for r in updated_rows if r.get("dataset") == "koniq"]
+    koniq_images_dict: Dict[str, float] = {}
+    for r in koniq_rows:
+        img_id = Path(r.get("image_id", "")).name
+        mos_val = r.get("orig_mos")
+        if mos_val is not None:
+            koniq_images_dict[img_id] = float(mos_val)
+        elif img_id not in koniq_images_dict:
+            koniq_images_dict[img_id] = 50.0
+
+    n_koniq_images = len(koniq_images_dict)
+    current_img_splits = {
+        img_id: next((r.get("split") for r in koniq_rows if Path(r.get("image_id", "")).name == img_id), None)
+        for img_id in koniq_images_dict
+    }
+    split_counts = {
+        sp: sum(1 for s in current_img_splits.values() if s == sp)
+        for sp in ["train", "val", "test"]
+    }
+
+    regenerate_splits = bool(args.force_split)
+    if n_koniq_images > 0 and not regenerate_splits:
+        min_val_test = max(1, int(n_koniq_images * 0.05))
+        min_train = max(1, int(n_koniq_images * 0.60))
+        if (
+            split_counts["train"] < min_train
+            or split_counts["val"] < min_val_test
+            or split_counts["test"] < min_val_test
+        ):
+            print(
+                f"[BACKFILL] KonIQ splits invalid or severely unbalanced: {split_counts} "
+                f"across {n_koniq_images} unique images. Regenerating deterministic 80/10/10 stratified split..."
+            )
+            regenerate_splits = True
+        else:
+            print(f"[BACKFILL] KonIQ existing split counts verified balanced: {split_counts}")
+
+    if regenerate_splits and n_koniq_images > 0:
         from nrcomp.data.splits import create_koniq_stratified_split, save_koniq_split_csv
 
-        koniq_images_dict: Dict[str, float] = {}
-        for r in updated_rows:
-            if r.get("dataset") == "koniq":
-                koniq_images_dict[Path(r.get("image_id", "")).name] = float(r.get("orig_mos", 50.0))
-
-        koniq_items = list(koniq_images_dict.items())
+        koniq_items = sorted(list(koniq_images_dict.items()))
         new_splits = create_koniq_stratified_split(koniq_items, train_ratio=0.8, val_ratio=0.1, test_ratio=0.1, seed=0)
 
         for r in updated_rows:
@@ -477,7 +511,8 @@ def main():
         out_split_csv = PROJECT_ROOT / "data" / "splits" / "koniq_split.csv"
         try:
             save_koniq_split_csv(new_splits, koniq_images_dict, out_split_csv)
-            print(f"[BACKFILL] Saved verified 80/10/10 split to {out_split_csv}")
+            new_counts = {sp: sum(1 for s in new_splits.values() if s == sp) for sp in ["train", "val", "test"]}
+            print(f"[BACKFILL] Successfully regenerated and saved verified 80/10/10 split to {out_split_csv}: {new_counts}")
         except Exception as e:
             print(f"[WARN] Could not write to {out_split_csv}: {e}")
 
