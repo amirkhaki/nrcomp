@@ -1,25 +1,36 @@
 # Stage 5: Evaluation Configuration
+# Checkpoints are discovered from nrcomp/runs.py:  checkpoints/{model}_seed{N}/best_model.pth
 stage: evaluate
 manifest_path: data/manifest.parquet
 latent_store_dir: data/latents
-target_metric: haarpsi
 
-blind_checkpoint: checkpoints/student_blind_a_best.pt
-conditioned_checkpoint: checkpoints/student_conditioned_a_best.pt
-config_b_checkpoint: checkpoints/student_conditioned_b_best.pt
+# All configs evaluated (artifacts go to reports/runs/{model}_seed{N}/ and {model}_ensemble/)
+models:
+  - blind_a
+  - conditioned_a
+  - conditioned_b
+  - no_rank_a
+  - pure_rank_a
+  - unmasked_a
+  - teacher_dists_b
+  - loss_l1_a
+
+# Models shown in reports/eval_main.md (ablations are reported in reports/ablations.md)
+primary_models:
+  - blind_a
+  - conditioned_a
+  - conditioned_b
+
+seeds: [42, 43, 44]
 
 eval_main_report: reports/eval_main.md
-eval_refs_report: reports/eval_refs.md
 
 evaluation:
   bootstrap_resamples: 1000
   confidence_level: 0.95
-  logistic_fit_on_val: true
   seed: 42
-  experiments:
-    - E1_in_distribution
-    - E2_cross_content
-    - E3_mos_independence
-    - E4_second_teacher
-    - E5_shortcut_baselines
-    - E8_efficiency
+  min_pairs_per_bin: 30        # PWRC threshold bins with fewer pairs are reported as n/a
+  ds_auc_ci_models:            # DS-AUC bootstrap is the slowest step; ablations skip it
+    - blind_a
+    - conditioned_a
+    - conditioned_b

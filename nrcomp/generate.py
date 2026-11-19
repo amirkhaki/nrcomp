@@ -2,6 +2,17 @@
 
 CLI Entry point:
     python -m nrcomp.generate --config configs/generate_pilot.yaml [--shard-id 0 --num-shards 1]
+
+Metadata rules (see nrcomp/data/metadata.py):
+  * KonIQ MOS comes from koniq10k_scores_and_distributions.csv (`MOS`, scale 1-5) and the
+    80/10/10 split is assigned deterministically from it.
+  * LiveC MOS comes from meta_info_LIVEChallengeDataset.csv (`mos`, 0-100); LiveC is test-only.
+  * Images without a verified MOS are skipped (never given a default MOS of 0.0).
+
+Known limitation: `bpp_actual` is 8 * len(pickle payload) / (H * W). The pickle wrapper adds
+a small constant overhead on top of the entropy-coded strings; it is identical for every
+sample, so rankings are unaffected, but absolute bpp is slightly inflated. Use
+scripts/measure_bpp_overhead.py to quantify it.
 """
 
 import argparse
@@ -17,11 +28,18 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from nrcomp.codec.wrapper import ELICWrapper
 from nrcomp.config import load_config
 from nrcomp.data.manifest import ParquetManifest
-from nrcomp.data.splits import create_or_load_koniq_splits
+from nrcomp.data.metadata import (
+    MosTable,
+    assign_koniq_splits,
+    default_koniq_scores_path,
+    default_livec_meta_path,
+    load_koniq_scores,
+    load_livec_scores,
+)
 from nrcomp.data.store import LatentStore, check_disk_space
 from nrcomp.lambdas import load_lambdas_config
 
-DEFAULT_LAMBDAS = load_lambdas_config()
+VALID_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".ppm", ".tif", ".tiff"}
 
 
 def log_failure(failure_log_path: Path, dataset: str, image_id: str, lambda_idx: int, error_msg: str):
@@ -35,112 +53,112 @@ def log_failure(failure_log_path: Path, dataset: str, image_id: str, lambda_idx:
         writer.writerow([dataset, image_id, lambda_idx, str(error_msg)])
 
 
+def _find_image_dir(dataset_cfg: Dict[str, Any], project_root: Path, dataset_name: str) -> Optional[Path]:
+    img_dir_raw = dataset_cfg.get("image_dir", f"data/raw/{dataset_name}")
+    img_dir = (project_root / img_dir_raw) if not Path(img_dir_raw).is_absolute() else Path(img_dir_raw)
+    if img_dir.exists():
+        return img_dir
+    candidates = [
+        project_root / "data" / "raw" / "koniq10k",
+        project_root / "data" / "raw" / "koniq-10k",
+        project_root / "data" / "raw" / "KonIQ-10k",
+        project_root / "data" / "raw" / "LIVEC",
+        project_root / "data" / "raw" / "livec",
+        project_root / "data" / "raw" / "CLIVE",
+    ]
+    for c in candidates:
+        if c.exists() and (dataset_name.lower() in c.name.lower() or c.name.lower() in dataset_name.lower()):
+            return c
+    print(f"[WARN] Image directory not found: {img_dir}")
+    return None
+
+
+def _list_images(img_dir: Path) -> List[Path]:
+    paths = sorted(p for p in img_dir.glob("*") if p.suffix.lower() in VALID_EXTENSIONS)
+    if not paths:
+        # Subdirectories (e.g. koniq10k/1024x768/ or LIVEC/Images/)
+        paths = sorted(p for p in img_dir.rglob("*") if p.suffix.lower() in VALID_EXTENSIONS)
+    return [p for p in paths if not p.name.startswith(".")]
+
+
+def _read_split_csv(path: Path) -> Dict[str, Tuple[str, float]]:
+    """Read (name -> (split, mos)); accepts `orig_mos` (splits.py output) or `mos`. Never defaults MOS."""
+    info: Dict[str, Tuple[str, float]] = {}
+    with open(path, "r", newline="") as f:
+        reader = csv.DictReader(f)
+        fields = set(reader.fieldnames or [])
+        mos_col = "orig_mos" if "orig_mos" in fields else ("mos" if "mos" in fields else None)
+        name_col = "image_id" if "image_id" in fields else ("image_name" if "image_name" in fields else None)
+        if mos_col is None or name_col is None or "split" not in fields:
+            raise ValueError(
+                f"{path}: split CSV needs columns [image_id|image_name], split, [orig_mos|mos]; found {sorted(fields)}"
+            )
+        for row in reader:
+            name = str(row[name_col]).strip()
+            raw_mos = row[mos_col]
+            if raw_mos is None or str(raw_mos).strip() == "":
+                raise ValueError(f"{path}: image '{name}' has an empty {mos_col}; refusing to default it.")
+            info[name] = (str(row["split"]).strip(), float(raw_mos))
+            info[Path(name).name] = info[name]
+    return info
+
+
 def collect_dataset_images(
     dataset_cfg: Dict[str, Any], project_root: Path
 ) -> List[Tuple[str, Path, str, float]]:
     """Collect image records: (dataset_name, file_path, split, orig_mos)."""
     dataset_name = dataset_cfg.get("name", dataset_cfg.get("dataset", "koniq"))
-    img_dir_raw = dataset_cfg.get("image_dir", f"data/raw/{dataset_name}")
-    img_dir = (project_root / img_dir_raw) if not Path(img_dir_raw).is_absolute() else Path(img_dir_raw)
-
-    if not img_dir.exists():
-        # Fallback directory matching (e.g. koniq10k vs koniq-10k, LIVEC vs livec)
-        candidates = [
-            project_root / "data" / "raw" / "koniq10k",
-            project_root / "data" / "raw" / "koniq-10k",
-            project_root / "data" / "raw" / "KonIQ-10k",
-            project_root / "data" / "raw" / "LIVEC",
-            project_root / "data" / "raw" / "livec",
-            project_root / "data" / "raw" / "CLIVE",
-        ]
-        found = False
-        for c in candidates:
-            if c.exists() and (dataset_name.lower() in c.name.lower() or c.name.lower() in dataset_name.lower()):
-                img_dir = c
-                found = True
-                break
-        if not found:
-            print(f"[WARN] Image directory not found: {img_dir}")
-            return []
-
+    img_dir = _find_image_dir(dataset_cfg, project_root, dataset_name)
+    if img_dir is None:
+        return []
     print(f"Using image directory for {dataset_name}: {img_dir}")
-    valid_extensions = {".png", ".jpg", ".jpeg", ".bmp", ".ppm", ".tif", ".tiff"}
-    all_img_paths = sorted([p for p in img_dir.glob("*") if p.suffix.lower() in valid_extensions])
-    if not all_img_paths:
-        # Check subdirectories (e.g., 1024x768/ or images/)
-        all_img_paths = sorted([p for p in img_dir.rglob("*") if p.suffix.lower() in valid_extensions])
-
-    # Filter out hidden files / non-images
-    all_img_paths = [p for p in all_img_paths if not p.name.startswith(".")]
+    all_img_paths = _list_images(img_dir)
     print(f"Found {len(all_img_paths)} images for {dataset_name}.")
 
-    # Attempt to load split information
+    # ---- per-image (split, mos) --------------------------------------------------------
     split_info: Dict[str, Tuple[str, float]] = {}
     split_csv_path = dataset_cfg.get("split_csv")
     if split_csv_path:
         p = (project_root / split_csv_path) if not Path(split_csv_path).is_absolute() else Path(split_csv_path)
         if p.exists():
-            with open(p, "r", newline="") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    img_name = row.get("image_name", row.get("image_id", ""))
-                    split = row.get("split", "train")
-                    mos = float(row.get("mos", 0.0))
-                    split_info[img_name] = (split, mos)
-                    split_info[Path(img_name).name] = (split, mos)
+            split_info = _read_split_csv(p)
 
-    # For KonIQ: if split CSV wasn't supplied or found, check for raw scores CSV
     if not split_info and dataset_name == "koniq":
-        scores_csv_candidates = [
-            img_dir / "koniq10k_scores_and_distributions.csv",
-            img_dir.parent / "koniq-10k" / "koniq10k_scores_and_distributions.csv",
-            img_dir / "koniq10k_mos.csv",
-            project_root / "data" / "raw" / "koniq10k_scores_and_distributions.csv",
-            project_root / "data" / "raw" / "koniq-10k" / "koniq10k_scores_and_distributions.csv",
-        ]
-        # Also search recursively in img_dir, data/raw/, and data/raw/meta_info/
-        meta_info_dir = project_root / "data" / "raw" / "meta_info"
-        extra_csvs = (
-            list(img_dir.rglob("*.csv"))
-            + list((project_root / "data" / "raw").glob("*.csv"))
-            + (list(meta_info_dir.rglob("*.csv")) if meta_info_dir.exists() else [])
-        )
-        for p in extra_csvs:
-            if p not in scores_csv_candidates:
-                scores_csv_candidates.append(p)
+        scores_path = Path(dataset_cfg["scores_csv"]) if dataset_cfg.get("scores_csv") else default_koniq_scores_path(project_root)
+        table: MosTable = load_koniq_scores(scores_path)
+        image_mos = {}
+        for ip in all_img_paths:
+            mos = table.get(ip.name)
+            if mos is not None:
+                image_mos[ip.name] = mos
+        splits = assign_koniq_splits(image_mos, seed=int(dataset_cfg.get("split_seed", 0)))
+        split_info = {name: (splits[name], image_mos[name]) for name in image_mos}
+    elif not split_info and dataset_name == "livec":
+        meta_path = Path(dataset_cfg["meta_csv"]) if dataset_cfg.get("meta_csv") else default_livec_meta_path(project_root)
+        table = load_livec_scores(meta_path)
+        for ip in all_img_paths:
+            mos = table.get(ip.name)
+            if mos is not None:
+                split_info[ip.name] = ("test", mos)
 
-        for candidate in scores_csv_candidates:
-            if candidate.exists() and candidate.is_file():
-                try:
-                    out_split_csv = project_root / "data" / "splits" / "koniq_split.csv"
-                    create_or_load_koniq_splits(candidate, out_split_csv, seed=0)
-                    with open(out_split_csv, "r", newline="") as f:
-                        reader = csv.DictReader(f)
-                        for row in reader:
-                            img_name = row.get("image_id", row.get("image_name", ""))
-                            if not img_name:
-                                continue
-                            mos_val = float(row.get("orig_mos", row.get("mos", 0.0)))
-                            split_val = row.get("split", "train")
-                            split_info[img_name] = (split_val, mos_val)
-                            split_info[Path(img_name).name] = (split_val, mos_val)
-                    if split_info:
-                        break
-                except Exception:
-                    pass
+    # ---- drop images without verified metadata (never default to MOS 0.0) -------------
+    if dataset_name in ("koniq", "livec") or split_info:
+        usable = [p for p in all_img_paths if p.name in split_info]
+        dropped = len(all_img_paths) - len(usable)
+        if dropped:
+            print(f"[WARN] {dropped} {dataset_name} images have no verified MOS/split and are skipped.")
+        all_img_paths = usable
 
-    # Subsetting via max_images if specified in dataset config
+    # ---- optional proportional subsetting ---------------------------------------------
     max_images = dataset_cfg.get("max_images")
     if max_images and len(all_img_paths) > max_images:
         if split_info:
             from collections import defaultdict
+
             by_split = defaultdict(list)
             for p in all_img_paths:
-                info = split_info.get(p.name)
-                s = info[0] if info else ("test" if dataset_name == "livec" else "train")
-                by_split[s].append(p)
-
-            selected_paths = []
+                by_split[split_info[p.name][0]].append(p)
+            selected_paths: List[Path] = []
             for s in ["train", "val", "test"]:
                 plist = by_split.get(s, [])
                 if plist:
@@ -154,23 +172,11 @@ def collect_dataset_images(
     records = []
     for img_path in all_img_paths:
         if split_info:
-            if img_path.name in split_info:
-                split, mos = split_info[img_path.name]
-            else:
-                raise ValueError(
-                    f"Image '{img_path.name}' in dataset '{dataset_name}' not found in split/scores map! "
-                    f"Cannot default to 0.0 MOS (failed filename-to-MOS/split lookup)."
-                )
-        elif dataset_name in ("koniq", "livec"):
-            raise ValueError(
-                f"Missing split/scores metadata for '{dataset_name}' dataset. "
-                f"Ensure KonIQ/LiveC split CSV or scores file is provided."
-            )
+            split, mos = split_info[img_path.name]
         else:
             split = dataset_cfg.get("default_split", "train")
             mos = float(dataset_cfg.get("default_mos", 0.0))
         records.append((dataset_name, img_path, split, mos))
-
     return records
 
 
@@ -191,28 +197,24 @@ def main():
     global_store_recons = cfg.get("store_recons", False)
     failure_log_path = PROJECT_ROOT / cfg.get("failure_log", "reports/failures.csv")
 
-    # Collect datasets
     datasets_cfgs = cfg.get("datasets")
     if not datasets_cfgs:
         datasets_cfgs = [cfg]
 
     all_image_records: List[Tuple[str, Path, str, float]] = []
     for d_cfg in datasets_cfgs:
-        imgs = collect_dataset_images(d_cfg, PROJECT_ROOT)
-        all_image_records.extend(imgs)
+        all_image_records.extend(collect_dataset_images(d_cfg, PROJECT_ROOT))
 
     max_images = cfg.get("max_images")
     if max_images and len(all_image_records) > max_images:
         all_image_records = all_image_records[:max_images]
 
-    # Apply sharding
     sharded_records = all_image_records[args.shard_id :: args.num_shards]
-    lambdas_cfg = cfg.get("lambdas", DEFAULT_LAMBDAS)
+    lambdas_cfg = cfg.get("lambdas") or load_lambdas_config()
 
     print(f"Total images: {len(all_image_records)}, Shard {args.shard_id}/{args.num_shards}: {len(sharded_records)} images.")
     print(f"Target lambdas: {len(lambdas_cfg)} operating points.")
 
-    # Initialize manifest and import pilot samples if manifest is currently empty
     manifest = ParquetManifest(manifest_path)
     if len(manifest) == 0:
         for pilot_cand in [
@@ -220,26 +222,20 @@ def main():
             manifest_path.parent / "manifest_pilot.csv",
         ]:
             if pilot_cand.exists():
-                try:
-                    p_man = ParquetManifest(pilot_cand)
-                    for r in p_man.get_all_rows():
-                        manifest.add_row(r)
-                    manifest.flush()
-                    print(f"Imported {len(manifest)} existing pilot samples from {pilot_cand.name}.")
-                    break
-                except Exception:
-                    pass
+                p_man = ParquetManifest(pilot_cand)
+                for r in p_man.get_all_rows():
+                    manifest.add_row(r)
+                manifest.flush()
+                print(f"Imported {len(manifest)} existing pilot samples from {pilot_cand.name}.")
+                break
 
     existing_keys = manifest.get_existing_keys()
     needed_samples = 0
     for dataset_name, img_path, _, _ in sharded_records:
-        image_id = img_path.name
         for l_item in lambdas_cfg:
-            lambda_idx = l_item["idx"]
-            if (dataset_name, str(image_id), int(lambda_idx)) not in existing_keys:
+            if (dataset_name, str(img_path.name), int(l_item["idx"])) not in existing_keys:
                 needed_samples += 1
 
-    # Pre-flight disk space check on ungenerated samples
     has_space, free_bytes, required_bytes = check_disk_space(
         latent_store_dir, needed_samples, bytes_per_sample=int(1.8 * 1024 * 1024), safety_margin=1.1
     )
@@ -258,13 +254,10 @@ def main():
     device = args.device if (torch.cuda.is_available() and args.device == "cuda") else "cpu"
     print(f"Running on device: {device}")
 
-    # Initialize codec wrapper and load checkpoints
     wrapper = ELICWrapper(weights_dir=weights_dir, device=device)
     for l_item in lambdas_cfg:
-        idx = l_item["idx"]
-        ckpt = l_item["checkpoint"]
-        print(f"Loading codec lambda {idx} ({l_item['name']}): {ckpt}...")
-        wrapper.load_model(idx, ckpt)
+        print(f"Loading codec lambda {l_item['idx']} ({l_item['name']}): {l_item['checkpoint']}...")
+        wrapper.load_model(l_item["idx"], l_item["checkpoint"])
 
     latent_store = LatentStore(root_dir=latent_store_dir, store_format=cfg.get("format", "npz"))
 
@@ -288,25 +281,21 @@ def main():
 
         for l_item in lambdas_cfg:
             lambda_idx = l_item["idx"]
-            lambda_val = float(l_item["name"])
+            lambda_val = float(l_item["value"])
 
-            # Idempotence: check if row already exists in manifest
             if manifest.exists(dataset_name, image_id, lambda_idx):
                 skipped_count += 1
                 continue
 
             try:
-                # 1. Compress
                 bitstream_bytes, meta = wrapper.compress(orig_np, lambda_idx)
                 bpp_actual = float(8.0 * len(bitstream_bytes) / (orig_h * orig_w))
 
-                # 2. Extract latents directly from bitstream payload
                 latent_dict = wrapper.extract_latents_from_bitstream(bitstream_bytes, meta)
                 y_hat = latent_dict["y_hat"]
                 z_hat = latent_dict["z_hat"]
                 valid_mask = latent_dict["valid_mask"]
 
-                # 3. Save latents
                 dest_latent_path = latent_store.get_path(dataset_name, image_id, lambda_idx)
                 latent_store.save_latents(
                     dest_latent_path,
@@ -315,7 +304,6 @@ def main():
                     valid_mask=valid_mask,
                 )
 
-                # 4. Handle reconstruction
                 store_recon_for_sample = (
                     global_store_recons
                     or split in ["test", "livec_test", "val"]
@@ -333,7 +321,6 @@ def main():
 
                 padded_h, padded_w = meta["padded_size"]
 
-                # 5. Add manifest row
                 row = {
                     "dataset": dataset_name,
                     "image_id": image_id,
@@ -348,7 +335,7 @@ def main():
                     "padded_height": padded_h,
                     "padded_width": padded_w,
                     "bpp_actual": bpp_actual,
-                    "bpp_est": None,  # Dropped placeholder duplicate; set to None unless computed by entropy model
+                    "bpp_est": None,
                     "psnr": None,
                     "haarpsi": None,
                     "dists": None,
@@ -362,7 +349,6 @@ def main():
                 log_failure(failure_log_path, dataset_name, image_id, lambda_idx, str(e))
                 failed_count += 1
 
-        # Periodic flush to disk every 5 images
         if (img_idx + 1) % 5 == 0 or (img_idx + 1) == len(sharded_records):
             manifest.flush()
             print(
@@ -371,7 +357,6 @@ def main():
                 flush=True,
             )
 
-    # Final flush
     manifest.flush()
     print("\n--- Data Generation Finished ---")
     print(f"Total Generated: {completed_count}, Skipped (existing): {skipped_count}, Failures: {failed_count}")

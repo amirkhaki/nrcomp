@@ -137,12 +137,9 @@ class QualityMetrics:
         """Compute all configured metrics for orig and recon."""
         results: Dict[str, float] = {}
 
-        # 1. PSNR
+        # 1. PSNR (errors propagate: a failed metric must never become a fake 0.0 label)
         if "psnr" in self.enable_metrics:
-            try:
-                results["psnr"] = compute_psnr(orig, recon)
-            except Exception:
-                results["psnr"] = 0.0
+            results["psnr"] = compute_psnr(orig, recon)
 
         # Neural / FR metrics (HaarPSI, DISTS)
         try:
@@ -159,8 +156,9 @@ class QualityMetrics:
                     val = self.models["dists"](t_recon, t_orig)
                     results["dists"] = float(val.item() if hasattr(val, "item") else val)
         except ImportError:
+            # torch unavailable (offline dev machine): neural metrics were never initialized.
             pass
         except Exception as e:
-            print(f"[QualityMetrics WARN] Metric computation failed: {e}")
+            raise RuntimeError(f"Metric computation failed: {e}") from e
 
         return results

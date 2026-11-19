@@ -1,15 +1,14 @@
-# Stage 4: Latent Student Training - Ablation A5 (Teacher = DISTS)
+# Ablation A5 (teacher = DISTS): the target is 1 - DISTS (higher = better).
+# Reference model: conditioned_b (identical except target_metric).
+# Both models are compared on BOTH teachers (HaarPSI and 1 - DISTS) by evaluate.py.
 stage: train
 config_name: teacher_dists_b
 manifest_path: data/manifest.parquet
 latent_store_dir: data/latents
-output_dir: checkpoints/teacher_dists_b
-history_path: reports/training_teacher_dists_b_history.csv
-plot_path: reports/training_teacher_dists_b_curves.png
-target_metric: dists  # Optimizes directly on second teacher DISTS (Ablation A5)
+target_metric: dists
 
 model:
-  config: B  # y_hat + z_hat
+  config: B
   in_channels_y: 320
   in_channels_z: 192
   width: 256
@@ -21,7 +20,7 @@ model:
   use_mask: true
 
 loss:
-  smooth_l1_beta: 0.05
+  smooth_l1_beta: 0.01
   alpha_rank: 0.5
   rank_margin: 0.0
 
@@ -38,3 +37,5 @@ training:
   num_workers: 0
   early_stopping_patience: 5
   early_stopping_min_delta: 0.0005
+  min_train_images: 100
+  min_val_images: 30

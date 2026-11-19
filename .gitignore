@@ -246,3 +246,7 @@ reports/*.csv
 reports/*.png
 reports/*.parquet
 
+# Local execution notes & zip archives
+reports.zip
+data.txt
+

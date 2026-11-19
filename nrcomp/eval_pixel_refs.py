@@ -1,21 +1,16 @@
-"""Evaluation of Pixel-Domain References (E6) and Systematic Ablations.
+"""Stage 6 reports: pixel/pretrained references (E6/E8) and the ablation table.
 
-Enforces Ground Rule 1: NO hardcoded numbers. All numbers must be loaded
-from real run artifacts in reports/runs/{run_name}/metrics.json or predictions.parquet.
-If an artifact is missing, raises an error or writes 'NOT RUN'.
+Enforces design.md Section 0 rule 1: NO hardcoded numbers. Every number is read from
+artifacts written by `python -m nrcomp.evaluate` (reports/runs/{run}/eval_metrics.json and
+predictions.csv); an absent artifact renders as NOT RUN -- never as 0.0.
 
 Outputs:
-- reports/eval_refs.md (E6 comparison)
-- reports/ablations.md (Ablation table from real run artifacts)
+  reports/eval_refs.md   -- E6 comparison (NOT RUN until the pixel student / pretrained NR runs exist)
+  reports/ablations.md   -- ablations vs their reference model, per split, with paired bootstrap tests
 """
 
 import argparse
-import datetime
-import hashlib
 import json
-import math
-import os
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -23,254 +18,276 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from nrcomp import runs
 from nrcomp.config import load_config
-from nrcomp.lambdas import load_lambdas_config
+from nrcomp.eval_metrics import (
+    compute_paired_difference_test,
+    compute_sample_mean_std,
+    records_with_teacher_target,
+)
+from nrcomp.provenance import collect_provenance, format_provenance_header, sha256_file
+
+SPLITS = [("koniq_test", "KonIQ test"), ("livec_test", "LiveC test")]
+NOT_RUN = "NOT RUN"
+
+# (id, description, variant model, reference model, teacher(s) used for the comparison)
+ABLATION_DEFS: List[Tuple[str, str, str, str, List[Optional[str]]]] = [
+    ("A2a", "Ranking loss: regression only (alpha=0)", "no_rank_a", "conditioned_a", [None]),
+    ("A2b", "Ranking loss: ranking only (alpha=1)", "pure_rank_a", "conditioned_a", [None]),
+    ("A3", "Hyperprior input: Config A (y_hat only) vs Config B (y_hat + z_hat)", "conditioned_a", "conditioned_b", [None]),
+    ("A4", "Lambda conditioning: blind vs conditioned", "blind_a", "conditioned_a", [None]),
+    ("A5", "Teacher: DISTS-trained vs HaarPSI-trained (both Config B)", "teacher_dists_b", "conditioned_b", ["haarpsi", "one_minus_dists"]),
+    ("A7", "Spatial masking: unmasked vs masked", "unmasked_a", "conditioned_a", [None]),
+    ("A9", "Regression loss: plain L1 vs Smooth L1", "loss_l1_a", "conditioned_a", [None]),
+]
 
 
-def compute_file_sha256(path: Path) -> str:
-    """Compute hex SHA-256 hash of a file."""
+def load_run_artifact(
+    run_name: str,
+    runs_dir: Union[Path, Dict[str, Any]],
+    strict: bool = False,
+    filename: str = runs.EVAL_METRICS_FILE,
+) -> Optional[Dict[str, Any]]:
+    """Load an evaluation artifact (default eval_metrics.json) for a run, or None / raise."""
+    if isinstance(runs_dir, dict):
+        if run_name in runs_dir:
+            return runs_dir[run_name]
+        return None
+    path = runs_dir / run_name / filename
     if not path.exists():
-        return "MISSING"
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def get_git_revision_hash() -> str:
-    """Return git commit hash if available."""
-    try:
-        out = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=PROJECT_ROOT)
-        return out.decode("ascii").strip()
-    except Exception:
-        return "UNKNOWN_GIT_SHA"
-
-
-def load_run_artifact(run_name: str, runs_dir: Path, strict: bool = False) -> Optional[Dict[str, Any]]:
-    """Load metrics.json artifact for a given run name."""
-    run_path = runs_dir / run_name / "metrics.json"
-    if not run_path.exists():
         if strict:
-            raise FileNotFoundError(f"Required run artifact missing: {run_path}")
+            raise FileNotFoundError(f"Required run artifact missing: {path}")
         return None
-
     try:
-        with open(run_path, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        data["_artifact_path"] = str(run_path)
-        data["_artifact_sha256"] = compute_file_sha256(run_path)
-        return data
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         if strict:
-            raise RuntimeError(f"Corrupt run artifact {run_path}: {e}")
+            raise RuntimeError(f"Corrupt run artifact {path}: {e}") from e
         return None
+    data["_artifact_path"] = str(path)
+    data["_artifact_sha256"] = sha256_file(path)
+    return data
+
+
+def _fmt(v: Any, nd: int = 4) -> str:
+    return "n/a" if v is None else f"{v:.{nd}f}"
+
+
+def _split_metric(doc: Optional[Dict[str, Any]], split: str, metric: str) -> Optional[float]:
+    if not doc or not isinstance(doc, dict):
+        return None
+    sp = ((doc or {}).get("splits") or {}).get(split)
+    if sp and metric in sp:
+        return sp.get(metric)
+    if metric in doc:
+        return doc.get(metric)
+    return None
+
+
+def _seed_stat(
+    model: str,
+    split: str,
+    runs_dir: Union[Path, Dict[str, Any]],
+    metric: str = "within_lambda_srocc",
+) -> Tuple[Optional[float], Optional[float], int]:
+    vals = []
+    if isinstance(runs_dir, dict):
+        for candidate in [model, f"student_{model}", runs.ensemble_name(model)]:
+            if candidate in runs_dir:
+                v = _split_metric(runs_dir[candidate], split, metric)
+                if v is not None:
+                    vals.append(v)
+                    break
+        for seed in runs.DEFAULT_SEEDS:
+            cand = runs.run_name(model, seed)
+            if cand in runs_dir:
+                v = _split_metric(runs_dir[cand], split, metric)
+                if v is not None:
+                    vals.append(v)
+    else:
+        for seed in runs.DEFAULT_SEEDS:
+            doc = load_run_artifact(runs.run_name(model, seed), runs_dir)
+            v = _split_metric(doc, split, metric)
+            if v is not None:
+                vals.append(v)
+    mean, std = compute_sample_mean_std(vals)
+    return mean, std, len(vals)
+
+
+def _load_ensemble_records(
+    model: str, split: str, runs_dir: Union[Path, Dict[str, Any]]
+) -> Optional[List[Dict[str, Any]]]:
+    if isinstance(runs_dir, dict):
+        return None
+    from nrcomp.evaluate import load_predictions_csv
+
+    path = runs_dir / runs.ensemble_name(model) / f"{runs.PREDICTIONS_STEM}.csv"
+    if not path.exists():
+        return None
+    return [r for r in load_predictions_csv(path) if r["split"] == split] or None
 
 
 def format_pixel_refs_report(
-    provenance_info: Dict[str, Any],
+    provenance_header: Union[str, Dict[str, Any]],
     latent_student_run: Optional[Dict[str, Any]],
     pixel_student_run: Optional[Dict[str, Any]],
     pretrained_nr_runs: Dict[str, Optional[Dict[str, Any]]],
     latency_stats: Optional[Dict[str, float]],
 ) -> str:
-    """Format reports/eval_refs.md strictly from loaded run artifacts."""
-    lines = []
-    lines.append("# Stage 6: Pixel References & Comparative Baselines (`eval_refs.md`)")
+    """eval_refs.md, strictly from loaded artifacts."""
+    if isinstance(provenance_header, dict):
+        header_str = format_provenance_header(provenance_header, "Stage 6 Provenance")
+    else:
+        header_str = str(provenance_header) if provenance_header else ""
+    lines = [header_str, "# Stage 6: Pixel References & Comparative Baselines (`eval_refs.md`)", ""]
+    lines.append("## Input run artifacts")
     lines.append("")
-    lines.append("## Provenance Header")
-    lines.append(f"- **Git SHA:** `{provenance_info.get('git_sha', 'UNKNOWN')}`")
-    lines.append(f"- **Date:** {provenance_info.get('date', datetime.datetime.now().isoformat())}")
-    lines.append(f"- **Config Path:** `{provenance_info.get('config_path', '')}`")
-    lines.append(f"- **Config SHA256:** `{provenance_info.get('config_sha256', '')}`")
-    lines.append(f"- **Manifest Path:** `{provenance_info.get('manifest_path', '')}`")
-    lines.append(f"- **Manifest SHA256:** `{provenance_info.get('manifest_sha256', '')}`")
-    lines.append("- **Input Run Artifacts:**")
-    for name, art in [("latent_student", latent_student_run), ("pixel_student", pixel_student_run)] + list(pretrained_nr_runs.items()):
+    named = [("latent_student", latent_student_run), ("pixel_student", pixel_student_run)] + list(pretrained_nr_runs.items())
+    for name, art in named:
         if art is not None:
-            lines.append(f"  - `{name}`: `{art.get('_artifact_path')}` (SHA256: `{art.get('_artifact_sha256')}`)")
+            lines.append(f"- `{name}`: `{art.get('_artifact_path')}` (SHA-256: `{art.get('_artifact_sha256')}`)")
         else:
-            lines.append(f"  - `{name}`: NOT RUN")
+            lines.append(f"- `{name}`: {NOT_RUN}")
     lines.append("")
     lines.append("---")
     lines.append("")
-    lines.append("## 1. Latency & Computational Efficiency Trade-Off (E8)")
+    lines.append("## 1. Latency & Computational Efficiency (E8)")
     lines.append("")
-    lines.append("| Pipeline Approach | Synthesis Decode ($\\hat{y} \\to \\hat{x}$) | Model Forward Pass | Total Latency (ms) | Speedup vs Pixel |")
-    lines.append("| :--- | :---: | :---: | :---: | :---: |")
-
+    lines.append("| Pipeline | Synthesis decode (ms) | Model forward (ms) | Total (ms) |")
+    lines.append("| :--- | :---: | :---: | :---: |")
     if latency_stats:
-        lat_student = f"{latency_stats.get('latent_student_ms', 0.0):.2f} ms"
-        decode_ms = f"{latency_stats.get('synthesis_decode_ms', 0.0):.1f} ms"
-        pix_fwd = f"{latency_stats.get('pixel_student_ms', 0.0):.2f} ms"
-        pix_tot = f"{latency_stats.get('total_pixel_pipeline_ms', 0.0):.2f} ms"
-        speedup = f"{latency_stats.get('speedup_ratio', 1.0):.1f}x"
-        lines.append(f"| **Latent Student (Ours)** | **0.0 ms (Bypassed)** | **{lat_student}** | **{lat_student}** | **{speedup} FASTER** |")
-        lines.append(f"| Pixel Student (Custom CNN) | {decode_ms} | {pix_fwd} | {pix_tot} | 1.0x |")
+        speedup = latency_stats.get('speedup_ratio')
+        speedup_txt = f" ({_fmt(speedup, 1)}x FASTER)" if speedup else ""
+        lines.append(f"| Latent student | bypassed | {_fmt(latency_stats.get('latent_student_ms'), 2)} | {_fmt(latency_stats.get('latent_student_ms'), 2)}{speedup_txt} |")
+        lines.append(f"| Pixel student (decode + CNN) | {_fmt(latency_stats.get('synthesis_decode_ms'), 2)} | "
+                     f"{_fmt(latency_stats.get('pixel_student_ms'), 2)} | {_fmt(latency_stats.get('total_pixel_pipeline_ms'), 2)} |")
     else:
-        lines.append("| **Latent Student (Ours)** | **0.0 ms (Bypassed)** | NOT RUN | NOT RUN | NOT RUN |")
-        lines.append("| Pixel Student (Custom CNN) | NOT RUN | NOT RUN | NOT RUN | NOT RUN |")
-
+        lines.append(f"| Latent student | bypassed | {NOT_RUN} | {NOT_RUN} |")
+        lines.append(f"| Pixel student (decode + CNN) | {NOT_RUN} | {NOT_RUN} | {NOT_RUN} |")
     lines.append("")
     lines.append("---")
     lines.append("")
-    lines.append("## 2. Accuracy Comparison on KonIQ Test Split (E6)")
+    lines.append("## 2. Accuracy comparison (E6), within-λ SROCC per split")
     lines.append("")
-    lines.append("| Model / Approach | Domain | Overall SROCC | Within-$\\lambda$ SROCC | Spearman with $\\text{orig\\_mos}$ | Partial SROCC ($s, \\text{mos} \\mid y$) |")
-    lines.append("| :--- | :---: | :---: | :---: | :---: | :---: |")
-
-    # Latent Student row
-    if latent_student_run:
-        srocc = f"{latent_student_run.get('srocc', 0.0):.4f}"
-        wl_srocc = f"{latent_student_run.get('within_lambda_srocc', 0.0):.4f}"
-        r_mos = f"{latent_student_run.get('rho_mos', 0.0):.4f}" if 'rho_mos' in latent_student_run else "N/A"
-        p_mos = f"{latent_student_run.get('partial_mos', 0.0):.4f}" if 'partial_mos' in latent_student_run else "N/A"
-        lines.append(f"| **Latent Student** | **Quantized Latents** | **{srocc}** | **{wl_srocc}** | {r_mos} | **{p_mos}** |")
-    else:
-        lines.append("| **Latent Student** | **Quantized Latents** | NOT RUN | NOT RUN | NOT RUN | NOT RUN |")
-
-    # Pixel Student row
-    if pixel_student_run:
-        srocc = f"{pixel_student_run.get('srocc', 0.0):.4f}"
-        wl_srocc = f"{pixel_student_run.get('within_lambda_srocc', 0.0):.4f}"
-        r_mos = f"{pixel_student_run.get('rho_mos', 0.0):.4f}" if 'rho_mos' in pixel_student_run else "N/A"
-        p_mos = f"{pixel_student_run.get('partial_mos', 0.0):.4f}" if 'partial_mos' in pixel_student_run else "N/A"
-        lines.append(f"| Pixel Student (Custom CNN) | Decoded Pixels | {srocc} | {wl_srocc} | {r_mos} | {p_mos} |")
-    else:
-        lines.append("| Pixel Student (Custom CNN) | Decoded Pixels | NOT RUN | NOT RUN | NOT RUN | NOT RUN |")
-
-    # Pretrained NR models rows
-    for name, run_data in pretrained_nr_runs.items():
-        if run_data:
-            srocc = f"{run_data.get('srocc', 0.0):.4f}"
-            wl_srocc = f"{run_data.get('within_lambda_srocc', 0.0):.4f}"
-            r_mos = f"{run_data.get('rho_mos', 0.0):.4f}" if 'rho_mos' in run_data else "N/A"
-            p_mos = f"{run_data.get('partial_mos', 0.0):.4f}" if 'partial_mos' in run_data else "N/A"
-            lines.append(f"| Pretrained {name.upper()} | Decoded Pixels | {srocc} | {wl_srocc} | {r_mos} | {p_mos} |")
+    lines.append("| Model | Domain | KonIQ test within-λ | LiveC test within-λ |")
+    lines.append("| :--- | :---: | :---: | :---: |")
+    rows = [("Latent student (Conditioned B, ensemble)", "Quantized latents", latent_student_run),
+            ("Pixel student (custom CNN)", "Decoded pixels", pixel_student_run)]
+    rows += [(f"Pretrained {n.upper()}", "Decoded pixels", d) for n, d in pretrained_nr_runs.items()]
+    for label, domain, doc in rows:
+        if doc is None:
+            lines.append(f"| {label} | {domain} | {NOT_RUN} | {NOT_RUN} |")
         else:
-            lines.append(f"| Pretrained {name.upper()} | Decoded Pixels | NOT RUN | NOT RUN | NOT RUN | NOT RUN |")
-
+            lines.append(f"| {label} | {domain} | {_fmt(_split_metric(doc, 'koniq_test', 'within_lambda_srocc'))} | "
+                         f"{_fmt(_split_metric(doc, 'livec_test', 'within_lambda_srocc'))} |")
     lines.append("")
     return "\n".join(lines)
 
 
 def format_ablations_report(
-    provenance_info: Dict[str, Any],
-    ablation_runs: Dict[str, Optional[Dict[str, Any]]],
+    provenance_header: Union[str, Dict[str, Any]],
+    runs_dir: Union[Path, Dict[str, Any]],
+    n_resamples: int = 1000,
+    seed: int = 42,
 ) -> str:
-    """Format reports/ablations.md strictly from loaded ablation run artifacts."""
-    lines = []
-    lines.append("# Core Architectural & Methodological Ablations (`ablations.md`)")
+    """ablations.md: each variant vs its reference, per split, strictly from evaluation artifacts."""
+    if isinstance(provenance_header, dict):
+        header_str = format_provenance_header(provenance_header, "Ablations Provenance")
+    else:
+        header_str = str(provenance_header) if provenance_header else ""
+    lines = [header_str, "# Core Architectural & Methodological Ablations (`ablations.md`)", ""]
+    lines.append("Each row compares an ablated variant with its reference model. 'Seed mean ± std' is over the individual "
+                 "seeds; Δ, CI and p come from the SEED ENSEMBLES with a paired image-clustered bootstrap "
+                 f"(N={n_resamples}) on within-λ SROCC. p-values are NOT corrected for multiple comparisons.")
     lines.append("")
-    lines.append("## Provenance Header")
-    lines.append(f"- **Git SHA:** `{provenance_info.get('git_sha', 'UNKNOWN')}`")
-    lines.append(f"- **Date:** {provenance_info.get('date', datetime.datetime.now().isoformat())}")
-    lines.append(f"- **Manifest SHA256:** `{provenance_info.get('manifest_sha256', '')}`")
-    lines.append("")
-    lines.append("---")
-    lines.append("")
-    lines.append("## Ablation Experiments Summary")
-    lines.append("")
-    lines.append("| Ablation ID | Description | Investigated Variant | Baseline / Full Model | Within-$\\lambda$ SROCC (KonIQ) | LiveC Within-$\\lambda$ | Run Status |")
-    lines.append("| :--- | :--- | :--- | :--- | :---: | :---: | :--- |")
 
-    ablation_defs = [
-        ("A3", "Hyperprior Inputs", "Config A (y_hat only)", "Config B (y_hat + z_hat)", "student_conditioned_a", "student_conditioned_b"),
-        ("A4", "Lambda Conditioning", "Blind Mode (No lambda)", "Conditioned Mode", "student_blind_a", "student_conditioned_a"),
-        ("A7", "Spatial Masking", "Unmasked Global Pooling", "Masked Mean + Attn Pooling", "unmasked_a", "student_conditioned_a"),
-        ("A2", "Pairwise Ranking Loss", "SmoothL1 Only (alpha=0.0)", "Composite Loss (alpha=0.5)", "no_rank_a", "student_conditioned_a"),
-        ("A5", "Target Metric", "Teacher = DISTS (1 - DISTS)", "Teacher = HaarPSI", "teacher_dists_b", "student_conditioned_b"),
-    ]
+    masked = load_run_artifact(runs.ensemble_name("unmasked_a"), runs_dir)
+    if masked is not None:
+        vf = masked.get("valid_cell_fraction") or {}
+        lines.append(f"Measured valid-cell fraction (A7 relevance): KonIQ test = {_fmt(vf.get('koniq_test'))}, "
+                     f"LiveC test = {_fmt(vf.get('livec_test'))}. A fraction of 1.0 means that split has no padding, so "
+                     "masking cannot change the result there.")
+        lines.append("")
 
-    for aid, desc, var_name, base_name, var_run_key, base_run_key in ablation_defs:
-        var_data = ablation_runs.get(var_run_key)
-        if var_data:
-            score_k = f"{var_data.get('koniq_within_lambda_srocc', var_data.get('within_lambda_srocc', 0.0)):.4f}"
-            score_l = f"{var_data.get('livec_within_lambda_srocc', 0.0):.4f}" if 'livec_within_lambda_srocc' in var_data else "N/A"
-            status = f"Completed (`{var_data.get('_artifact_path')}`)"
-        else:
-            score_k = "NOT RUN"
-            score_l = "NOT RUN"
-            status = f"Run artifact `reports/runs/{var_run_key}/metrics.json` missing"
-        lines.append(f"| **{aid}** | {desc} | {var_name} | {base_name} | **{score_k}** | {score_l} | {status} |")
-
-    lines.append("")
+    for split, title in SPLITS:
+        lines.append(f"## {title}")
+        lines.append("")
+        lines.append("| ID | Variant | Reference | Teacher | Variant seed mean ± std | Reference seed mean ± std | "
+                     "Δ ensemble (variant − reference) [95% CI] | p | Status |")
+        lines.append("| :--- | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :--- |")
+        for aid, desc, var_m, ref_m, teachers in ABLATION_DEFS:
+            var_mean, var_std, var_n = _seed_stat(var_m, split, runs_dir)
+            ref_mean, ref_std, ref_n = _seed_stat(ref_m, split, runs_dir)
+            ra = _load_ensemble_records(var_m, split, runs_dir)
+            rb = _load_ensemble_records(ref_m, split, runs_dir)
+            for teacher in teachers:
+                v_txt = f"{_fmt(var_mean)} ± {_fmt(var_std)} (n={var_n})" if var_n > 0 else NOT_RUN
+                r_txt = f"{_fmt(ref_mean)} ± {_fmt(ref_std)} (n={ref_n})" if ref_n > 0 else NOT_RUN
+                if ra is None or rb is None or var_n == 0 or ref_n == 0:
+                    missing = [m for m, r in ((var_m, ra), (ref_m, rb)) if r is None]
+                    lines.append(f"| **{aid}** | {runs.DISPLAY_NAMES.get(var_m, var_m)} | {runs.DISPLAY_NAMES.get(ref_m, ref_m)} | "
+                                 f"{teacher or 'own'} | {v_txt} | {r_txt} | {NOT_RUN} | - | missing ensemble artifacts: {missing or 'seed runs'} |")
+                    continue
+                if teacher is not None:
+                    recs_a = records_with_teacher_target(ra, teacher)
+                    recs_b = records_with_teacher_target(rb, teacher)
+                    # per-seed means are on each model's own target; for a common teacher use ensemble values only
+                    v_txt = r_txt = "see Δ"
+                else:
+                    recs_a, recs_b = ra, rb
+                    v_txt = f"{_fmt(var_mean)} ± {_fmt(var_std)} (n={var_n})"
+                    r_txt = f"{_fmt(ref_mean)} ± {_fmt(ref_std)} (n={ref_n})"
+                pt = compute_paired_difference_test(recs_a, recs_b, "within_lambda_srocc", n_resamples=n_resamples, seed=seed)
+                ci = pt["ci"]
+                delta_txt = (f"{_fmt(pt['delta_obs'])} [{_fmt(ci[0])}, {_fmt(ci[1])}]"
+                             if pt["delta_obs"] is not None else "n/a")
+                lines.append(f"| **{aid}** | {runs.DISPLAY_NAMES.get(var_m, var_m)} | {runs.DISPLAY_NAMES.get(ref_m, ref_m)} | "
+                             f"{teacher or 'own'} | {v_txt} | {r_txt} | {delta_txt} | {_fmt(pt['p_value'], 3)} | "
+                             f"{'significant' if pt['significant'] else 'not significant'} (n_img={pt['n_images']}) |")
+        lines.append("")
     return "\n".join(lines)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate Pixel References & Ablations Reports from Run Artifacts.")
-    parser.add_argument("--config", type=str, default="configs/eval_refs.yaml", help="Config file path.")
-    parser.add_argument("--runs-dir", type=str, default="reports/runs", help="Directory where run artifacts are stored.")
-    parser.add_argument("--strict", action="store_true", help="Raise error if any run artifact is missing.")
+    parser = argparse.ArgumentParser(description="Generate eval_refs.md and ablations.md from evaluation artifacts.")
+    parser.add_argument("--config", type=str, default="configs/eval_refs.yaml")
+    parser.add_argument("--runs-dir", type=str, default="reports/runs")
+    parser.add_argument("--n-resamples", type=int, default=1000)
+    parser.add_argument("--strict", action="store_true", help="Raise if a required artifact is missing.")
     args = parser.parse_args()
 
-    cfg_path = (PROJECT_ROOT / args.config) if not Path(args.config).is_absolute() else Path(args.config)
+    def resolve(p: str) -> Path:
+        return Path(p) if Path(p).is_absolute() else PROJECT_ROOT / p
+
+    cfg_path = resolve(args.config)
     cfg = load_config(cfg_path) if cfg_path.exists() else {}
+    runs_dir = resolve(args.runs_dir)
+    manifest_path = resolve(cfg.get("manifest_path", "data/manifest.parquet"))
+    out_refs = resolve(cfg.get("eval_refs_report", "reports/eval_refs.md"))
+    out_abl = resolve(cfg.get("ablations_report", "reports/ablations.md"))
+    out_refs.parent.mkdir(parents=True, exist_ok=True)
 
-    runs_dir = (PROJECT_ROOT / args.runs_dir) if not Path(args.runs_dir).is_absolute() else Path(args.runs_dir)
-    manifest_path = PROJECT_ROOT / cfg.get("manifest_path", "data/manifest.parquet")
+    latent = load_run_artifact(runs.ensemble_name("conditioned_b"), runs_dir, strict=args.strict)
+    pixel = load_run_artifact("pixel_student_conditioned", runs_dir, strict=False)
+    pretrained = {n: load_run_artifact(f"pretrained_{n}", runs_dir, strict=False) for n in ("clipiqa", "niqe", "musiq")}
+    latency_doc = load_run_artifact("latency_benchmark", runs_dir, strict=False)
+    latency_stats = latency_doc.get("latency_stats") if latency_doc else None
 
-    output_refs = Path(cfg.get("eval_refs_report", "reports/eval_refs.md"))
-    if not output_refs.is_absolute():
-        output_refs = PROJECT_ROOT / output_refs
-    output_refs.parent.mkdir(parents=True, exist_ok=True)
+    artifacts = [d["_artifact_path"] for d in [latent, pixel, latency_doc, *pretrained.values()] if d]
+    prov = collect_provenance(config_path=cfg_path, manifest_path=manifest_path, seeds=runs.DEFAULT_SEEDS, input_artifacts=artifacts)
+    header = format_provenance_header(prov, "Stage 6 Provenance")
 
-    output_ablations = Path(cfg.get("ablations_report", "reports/ablations.md"))
-    if not output_ablations.is_absolute():
-        output_ablations = PROJECT_ROOT / output_ablations
-    output_ablations.parent.mkdir(parents=True, exist_ok=True)
+    out_refs.write_text(format_pixel_refs_report(header, latent, pixel, pretrained, latency_stats), encoding="utf-8")
+    print(f"[SUCCESS] Pixel references report written to {out_refs}")
 
-    provenance_info = {
-        "git_sha": get_git_revision_hash(),
-        "date": datetime.datetime.now().isoformat(),
-        "config_path": str(cfg_path),
-        "config_sha256": compute_file_sha256(cfg_path),
-        "manifest_path": str(manifest_path),
-        "manifest_sha256": compute_file_sha256(manifest_path),
-    }
-
-    # Load artifacts without fabrication
-    latent_student_run = load_run_artifact("student_conditioned_b", runs_dir, strict=args.strict)
-    pixel_student_run = load_run_artifact("pixel_student_conditioned", runs_dir, strict=args.strict)
-    pretrained_nr_runs = {
-        "clipiqa": load_run_artifact("pretrained_clipiqa", runs_dir, strict=args.strict),
-        "niqe": load_run_artifact("pretrained_niqe", runs_dir, strict=args.strict),
-        "musiq": load_run_artifact("pretrained_musiq", runs_dir, strict=args.strict),
-    }
-
-    # Latency artifact if measured
-    latency_run = load_run_artifact("latency_benchmark", runs_dir, strict=False)
-    latency_stats = latency_run.get("latency_stats") if latency_run else None
-
-    # Write eval_refs.md
-    report_refs = format_pixel_refs_report(
-        provenance_info=provenance_info,
-        latent_student_run=latent_student_run,
-        pixel_student_run=pixel_student_run,
-        pretrained_nr_runs=pretrained_nr_runs,
-        latency_stats=latency_stats,
+    abl_artifacts = [str(p) for p in sorted(runs_dir.glob("*/eval_metrics.json"))]
+    abl_prov = collect_provenance(config_path=cfg_path, manifest_path=manifest_path, seeds=runs.DEFAULT_SEEDS, input_artifacts=abl_artifacts)
+    out_abl.write_text(
+        format_ablations_report(format_provenance_header(abl_prov, "Ablations Provenance"), runs_dir, n_resamples=args.n_resamples),
+        encoding="utf-8",
     )
-    with open(output_refs, "w", encoding="utf-8") as f:
-        f.write(report_refs)
-    print(f"[SUCCESS] Pixel references report written to {output_refs}")
-
-    # Load ablation runs
-    ablation_run_keys = [
-        "student_conditioned_a",
-        "student_conditioned_b",
-        "student_blind_a",
-        "unmasked_a",
-        "no_rank_a",
-        "teacher_dists_b",
-    ]
-    ablation_runs = {k: load_run_artifact(k, runs_dir, strict=args.strict) for k in ablation_run_keys}
-
-    # Write ablations.md
-    report_ablations = format_ablations_report(provenance_info, ablation_runs)
-    with open(output_ablations, "w", encoding="utf-8") as f:
-        f.write(report_ablations)
-    print(f"[SUCCESS] Ablations report written to {output_ablations}")
+    print(f"[SUCCESS] Ablations report written to {out_abl}")
 
 
 if __name__ == "__main__":

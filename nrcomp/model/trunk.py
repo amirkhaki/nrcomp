@@ -1,10 +1,15 @@
-"""Trunk architecture: ConvStem, ResBlock with mask protection, and Trunk.
+"""Trunk architecture: ConvStem, ConvNeXt-style ResBlock with FiLM, and Trunk.
 
-Per design doc Section 9.1 and Milestone M4 specification:
-- ConvStem: 1x1 Conv2d to width (256), followed by GroupNorm(32, 256).
-- ResBlock: Conv2d(3x3) -> GELU -> Conv2d(3x3) with residual connection.
-  Multiplies features by valid_mask to prevent padding leakage.
-- Trunk: 6 sequential ResBlocks at width 256.
+Per design.md Section 7:
+- "Lightweight ConvNeXt-style convolutional blocks operating directly on latent grids."
+- "Lambda conditioning ... injected via FiLM ... into intermediate residual blocks."
+
+Mask invariance (the reason GroupNorm was removed):
+  Every normalization here is PER POSITION over channels (LayerNorm over C). No statistic
+  is ever computed across spatial positions or across batch samples, so the output at a
+  valid cell cannot depend on how much extra zero-padding the batch contains. Features at
+  invalid cells are multiplied by the mask after the stem and after every block, so the
+  7x7 depthwise convolution always sees zeros outside the valid region.
 """
 
 from typing import Optional
@@ -12,11 +17,13 @@ from typing import Optional
 try:
     import torch
     import torch.nn as nn
+    import torch.nn.functional as F
     HAS_TORCH = True
     BaseModule = nn.Module
 except ImportError:
     torch = None
     nn = None
+    F = None
     HAS_TORCH = False
 
     class BaseModule:  # type: ignore
@@ -32,18 +39,35 @@ except ImportError:
             setattr(self, name, val)
 
 
-class ConvStem(BaseModule):
-    """1x1 Conv stem mapping input channels to trunk width with GroupNorm."""
+class ChannelLayerNorm(BaseModule):
+    """LayerNorm over the channel dimension of (B, C, H, W), computed in float32."""
 
-    def __init__(self, in_channels: int, out_channels: int = 256, num_groups: int = 32):
+    def __init__(self, channels: int, eps: float = 1e-6):
+        super().__init__()
+        self.channels = channels
+        self.eps = eps
+        if HAS_TORCH:
+            self.weight = nn.Parameter(torch.ones(channels))
+            self.bias = nn.Parameter(torch.zeros(channels))
+
+    def forward(self, x: "torch.Tensor") -> "torch.Tensor":
+        if not HAS_TORCH:
+            raise RuntimeError("PyTorch is required for ChannelLayerNorm forward pass.")
+        x32 = x.float().permute(0, 2, 3, 1)
+        x32 = F.layer_norm(x32, (self.channels,), self.weight.float(), self.bias.float(), self.eps)
+        return x32.permute(0, 3, 1, 2)
+
+
+class ConvStem(BaseModule):
+    """1x1 Conv stem mapping input channels to trunk width, followed by per-position LayerNorm."""
+
+    def __init__(self, in_channels: int, out_channels: int = 256):
         super().__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
-        self.num_groups = min(num_groups, out_channels)
-
         if HAS_TORCH:
             self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False)
-            self.norm = nn.GroupNorm(num_groups=self.num_groups, num_channels=out_channels)
+            self.norm = ChannelLayerNorm(out_channels)
         else:
             self.conv = None
             self.norm = None
@@ -58,47 +82,109 @@ class ConvStem(BaseModule):
 
 
 class ResBlock(BaseModule):
-    """Residual block with mask protection to prevent padding boundary leakage."""
+    """ConvNeXt-style block: dw7x7 -> LayerNorm -> [FiLM] -> 1x1 (x4) -> GELU -> 1x1 -> layer scale.
 
-    def __init__(self, channels: int = 256):
+    `film_dim` > 0 enables FiLM conditioning: scale/shift are predicted from a conditioning
+    vector (the lambda embedding) and applied right after the LayerNorm.
+    """
+
+    def __init__(
+        self,
+        channels: int = 256,
+        kernel_size: int = 7,
+        expansion: int = 4,
+        layer_scale_init: float = 0.1,
+        film_dim: Optional[int] = None,
+    ):
         super().__init__()
         self.channels = channels
-
+        self.film_dim = film_dim
         if HAS_TORCH:
-            self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+            self.dwconv = nn.Conv2d(channels, channels, kernel_size, padding=kernel_size // 2, groups=channels)
+            self.norm = ChannelLayerNorm(channels)
+            self.pw1 = nn.Conv2d(channels, channels * expansion, kernel_size=1)
             self.act = nn.GELU()
-            self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+            self.pw2 = nn.Conv2d(channels * expansion, channels, kernel_size=1)
+            self.gamma = nn.Parameter(layer_scale_init * torch.ones(channels))
+            if film_dim:
+                self.film = nn.Linear(film_dim, 2 * channels)
+                nn.init.normal_(self.film.weight, std=0.02)
+                nn.init.zeros_(self.film.bias)
+            else:
+                self.film = None
         else:
-            self.conv1 = None
+            self.dwconv = None
+            self.norm = None
+            self.pw1 = None
             self.act = None
-            self.conv2 = None
+            self.pw2 = None
+            self.film = None
 
-    def forward(self, x: "torch.Tensor", mask: Optional["torch.Tensor"] = None) -> "torch.Tensor":
+    def forward(
+        self,
+        x: "torch.Tensor",
+        mask: Optional["torch.Tensor"] = None,
+        cond: Optional["torch.Tensor"] = None,
+    ) -> "torch.Tensor":
         if not HAS_TORCH:
             raise RuntimeError("PyTorch is required for ResBlock forward pass.")
-        res = self.conv2(self.act(self.conv1(x)))
-        out = x + res
+        h = self.norm(self.dwconv(x))
+        if self.film is not None:
+            if cond is None:
+                raise ValueError("FiLM-enabled ResBlock requires a conditioning vector.")
+            scale, shift = self.film(cond.float()).chunk(2, dim=1)
+            h = h * (1.0 + scale[:, :, None, None]) + shift[:, :, None, None]
+        h = self.pw2(self.act(self.pw1(h)))
+        out = x + h.float() * self.gamma.view(1, -1, 1, 1)
         if mask is not None:
             out = out * mask
         return out
 
 
-class Trunk(BaseModule):
-    """Trunk consisting of a stack of ResBlocks at uniform channel width."""
+# Descriptive alias: the block is a ConvNeXt block.
+ConvNeXtBlock = ResBlock
 
-    def __init__(self, depth: int = 6, width: int = 256):
+
+class Trunk(BaseModule):
+    """Stack of ConvNeXt-style blocks at uniform channel width."""
+
+    def __init__(
+        self,
+        depth: int = 6,
+        width: int = 256,
+        kernel_size: int = 7,
+        expansion: int = 4,
+        layer_scale_init: float = 0.1,
+        film_dim: Optional[int] = None,
+    ):
         super().__init__()
         self.depth = depth
         self.width = width
-
+        self.film_dim = film_dim
         if HAS_TORCH:
-            self.blocks = nn.ModuleList([ResBlock(channels=width) for _ in range(depth)])
+            self.blocks = nn.ModuleList(
+                [
+                    ResBlock(
+                        channels=width,
+                        kernel_size=kernel_size,
+                        expansion=expansion,
+                        layer_scale_init=layer_scale_init,
+                        film_dim=film_dim,
+                    )
+                    for _ in range(depth)
+                ]
+            )
         else:
             self.blocks = []
 
-    def forward(self, x: "torch.Tensor", mask: Optional["torch.Tensor"] = None) -> "torch.Tensor":
+    def forward(
+        self,
+        x: "torch.Tensor",
+        mask: Optional["torch.Tensor"] = None,
+        cond: Optional["torch.Tensor"] = None,
+    ) -> "torch.Tensor":
         if not HAS_TORCH:
             raise RuntimeError("PyTorch is required for Trunk forward pass.")
         for block in self.blocks:
-            x = block(x, mask=mask)
+            x = block(x, mask=mask, cond=cond)
         return x

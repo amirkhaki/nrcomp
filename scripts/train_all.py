@@ -143,8 +143,9 @@ def main():
                 print(f"  {' '.join(cmd)}")
         if args.eval:
             print(f"  {sys.executable} -m nrcomp.evaluate --config configs/evaluate.yaml")
-        if len(seeds) > 1:
-            print(f"  {sys.executable} scripts/aggregate_seeds.py --seeds {','.join(str(s) for s in seeds)}")
+            if len(seeds) > 1:
+                print(f"  {sys.executable} scripts/aggregate_seeds.py --seeds {','.join(str(s) for s in seeds)}")
+            print(f"  {sys.executable} -m nrcomp.eval_pixel_refs --config configs/eval_refs.yaml")
         print("\n[DRY RUN COMPLETE] Exiting.")
         return
 
@@ -198,24 +199,7 @@ def main():
     print(f"Total Time: {total_elapsed / 60:.1f} minutes")
     print("================================================================================")
 
-    # Optional Multi-Seed Aggregation
-    if len(seeds) > 1:
-        print("\n[AGGREGATION] Running scripts/aggregate_seeds.py...")
-        agg_cmd = [
-            sys.executable,
-            "scripts/aggregate_seeds.py",
-            "--seeds",
-            ",".join(str(s) for s in seeds),
-            "--manifest",
-            str(manifest_p.relative_to(PROJECT_ROOT) if manifest_p.is_relative_to(PROJECT_ROOT) else manifest_p),
-        ]
-        try:
-            subprocess.run(agg_cmd, cwd=str(PROJECT_ROOT), check=True)
-            print("[SUCCESS] Multi-seed aggregation completed.")
-        except Exception as e:
-            print(f"[WARN] Multi-seed aggregation failed: {e}")
-
-    # Optional Stage 5 Evaluation
+    # Stage 5 Evaluation & Multi-Seed Aggregation
     if args.eval:
         print("\n[EVALUATION] Running Stage 5 Evaluation (python -m nrcomp.evaluate)...")
         eval_cmd = [
@@ -232,6 +216,57 @@ def main():
             print("[SUCCESS] Stage 5 Evaluation completed -> reports/eval_main.md")
         except Exception as e:
             print(f"[WARN] Stage 5 Evaluation failed: {e}")
+
+        if len(seeds) > 1:
+            print("\n[AGGREGATION] Running scripts/aggregate_seeds.py...")
+            agg_cmd = [
+                sys.executable,
+                "scripts/aggregate_seeds.py",
+                "--seeds",
+                ",".join(str(s) for s in seeds),
+                "--manifest",
+                str(manifest_p.relative_to(PROJECT_ROOT) if manifest_p.is_relative_to(PROJECT_ROOT) else manifest_p),
+            ]
+            try:
+                subprocess.run(agg_cmd, cwd=str(PROJECT_ROOT), check=True)
+                print("[SUCCESS] Multi-seed aggregation completed -> reports/seed_aggregation.md")
+            except Exception as e:
+                print(f"[WARN] Multi-seed aggregation failed: {e}")
+
+        print("\n[EVALUATION] Running Stage 6 Pixel References & Ablations (python -m nrcomp.eval_pixel_refs)...")
+        refs_cmd = [
+            sys.executable,
+            "-m",
+            "nrcomp.eval_pixel_refs",
+            "--config",
+            "configs/eval_refs.yaml",
+        ]
+        try:
+            subprocess.run(refs_cmd, cwd=str(PROJECT_ROOT), check=True)
+            print("[SUCCESS] Stage 6 Evaluation completed -> reports/eval_refs.md & reports/ablations.md")
+        except Exception as e:
+            print(f"[WARN] Stage 6 Evaluation failed: {e}")
+    elif len(seeds) > 1:
+        # Check if evaluation artifacts already exist
+        runs_dir = PROJECT_ROOT / "reports" / "runs"
+        eval_artifacts = list(runs_dir.glob("*/eval_metrics.json")) if runs_dir.exists() else []
+        if eval_artifacts:
+            print("\n[AGGREGATION] Found existing eval artifacts. Running scripts/aggregate_seeds.py...")
+            agg_cmd = [
+                sys.executable,
+                "scripts/aggregate_seeds.py",
+                "--seeds",
+                ",".join(str(s) for s in seeds),
+                "--manifest",
+                str(manifest_p.relative_to(PROJECT_ROOT) if manifest_p.is_relative_to(PROJECT_ROOT) else manifest_p),
+            ]
+            try:
+                subprocess.run(agg_cmd, cwd=str(PROJECT_ROOT), check=True)
+                print("[SUCCESS] Multi-seed aggregation completed -> reports/seed_aggregation.md")
+            except Exception as e:
+                print(f"[WARN] Multi-seed aggregation failed: {e}")
+        else:
+            print("\n[INFO] Multi-seed training finished. Run 'make eval-main' to evaluate models and generate reports.")
 
 
 if __name__ == "__main__":

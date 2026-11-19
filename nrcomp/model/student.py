@@ -1,18 +1,21 @@
 """Latent-domain Student model predicting compression degradation from latents.
 
-Per Milestone M4 specification:
+Architecture (design.md Section 7):
 - Config A: y_hat only (320 channels).
-- Config B: y_hat (320) + 4x nearest-neighbor upsampled z_hat (192) fused via 1x1 conv.
-- Blind mode: No lambda conditioning, Head input width 512.
-- Conditioned mode: Learned lambda embedding added before trunk AND concatenated
-  into the MLP head (Head input width 768).
-- Mask protection: Features multiplied by valid_mask at input, after stem,
-  and after every ResBlock.
-- Precision: Trunk runs in autocast (bf16), while pooling, head, and loss math
-  are explicitly enforced in float32 to prevent output quantization blurring.
+- Config B: y_hat (320) and z_hat (192). z_hat is upsampled 4x with a transposed
+  convolution to the y_hat grid and concatenated along channels (320 + 192 = 512).
+- Trunk: ConvNeXt-style blocks (see trunk.py); no cross-position normalization.
+- Blind mode: no lambda information anywhere.
+- Conditioned mode: a learned lambda embedding drives FiLM inside every trunk block and is
+  also concatenated into the MLP head input.
+- Pooling: masked mean pooling + masked attention pooling (concatenated).
+- Head: Linear -> LayerNorm -> GELU -> Dropout -> Linear -> Sigmoid (s in [0, 1]).
+- Mask protection: input, stem output and every block output are multiplied by the valid
+  mask; predictions for a sample are independent of extra batch padding (server-tested).
+- Precision: trunk runs under autocast; normalization, pooling, head and loss run in fp32.
 """
 
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Optional
 
 try:
     import torch
@@ -58,20 +61,26 @@ class LatentStudent(BaseModule):
         lambda_embed_dim: Optional[int] = None,
         dropout: float = 0.1,
         use_mask: bool = True,
+        kernel_size: int = 7,
+        expansion: int = 4,
+        layer_scale_init: float = 0.1,
     ):
         super().__init__()
         self.config = config.upper()
+        if self.config not in ("A", "B"):
+            raise ValueError(f"config must be 'A' or 'B', got {config!r}")
         self.in_channels_y = in_channels_y
         self.in_channels_z = in_channels_z
         self.width = width
         self.num_res_blocks = num_res_blocks
         self.lambda_mode = lambda_mode.lower()
+        if self.lambda_mode not in ("blind", "conditioned"):
+            raise ValueError(f"lambda_mode must be 'blind' or 'conditioned', got {lambda_mode!r}")
         self.num_lambdas = num_lambdas
         self.lambda_embed_dim = lambda_embed_dim if lambda_embed_dim is not None else width
         self.dropout_rate = dropout
         self.use_mask = use_mask
 
-        # Normalization buffers
         if HAS_TORCH:
             self.register_buffer("mean_y", torch.zeros(1, in_channels_y, 1, 1))
             self.register_buffer("std_y", torch.ones(1, in_channels_y, 1, 1))
@@ -85,10 +94,8 @@ class LatentStudent(BaseModule):
             self.std_z = None
 
         self.lambda_embed = None
-        self.lambda_proj = None
-        self.stem_y = None
-        self.stem_z = None
-        self.fuse_b = None
+        self.z_up = None
+        self.stem = None
         self.trunk = None
         self.mean_pool = None
         self.attn_pool = None
@@ -97,36 +104,40 @@ class LatentStudent(BaseModule):
         if not HAS_TORCH:
             return
 
-        # 1. Stem(s)
-        self.stem_y = ConvStem(in_channels_y, width)
+        conditioned = self.lambda_mode == "conditioned"
+
+        # 1. Config B: transposed-conv 4x upsampling of z_hat, concatenated with y_hat.
+        stem_in = in_channels_y
         if self.config == "B":
-            self.stem_z = ConvStem(in_channels_z, width)
-            self.fuse_b = nn.Conv2d(width * 2, width, kernel_size=1, bias=False)
+            self.z_up = nn.ConvTranspose2d(in_channels_z, in_channels_z, kernel_size=4, stride=4)
+            stem_in = in_channels_y + in_channels_z
 
-        # 2. Lambda Embedding (Conditioned mode only)
-        if self.lambda_mode == "conditioned":
+        # 2. Stem
+        self.stem = ConvStem(stem_in, width)
+
+        # 3. Lambda embedding (conditioned mode only)
+        if conditioned:
             self.lambda_embed = nn.Embedding(num_lambdas, self.lambda_embed_dim)
-            if self.lambda_embed_dim != width:
-                self.lambda_proj = nn.Linear(self.lambda_embed_dim, width)
-            else:
-                self.lambda_proj = nn.Identity()
-        else:
-            self.lambda_embed = None
-            self.lambda_proj = None
 
-        # 3. Residual Trunk with mask protection
-        self.trunk = Trunk(depth=num_res_blocks, width=width)
+        # 4. Trunk with FiLM in every block (conditioned mode)
+        self.trunk = Trunk(
+            depth=num_res_blocks,
+            width=width,
+            kernel_size=kernel_size,
+            expansion=expansion,
+            layer_scale_init=layer_scale_init,
+            film_dim=self.lambda_embed_dim if conditioned else None,
+        )
 
-        # 4. Pooling
+        # 5. Pooling
         self.mean_pool = MaskedMeanPool()
         self.attn_pool = MaskedAttentionPool(channels=width)
 
-        # 5. MLP Head (enforced in fp32)
-        # In conditioned mode: 2 * width (pooled) + lambda_embed_dim
-        # In blind mode: 2 * width (pooled)
-        head_in_dim = (width * 2) + (self.lambda_embed_dim if self.lambda_mode == "conditioned" else 0)
+        # 6. MLP head (fp32): 2 * width pooled (+ lambda embedding in conditioned mode)
+        head_in_dim = (width * 2) + (self.lambda_embed_dim if conditioned else 0)
         self.head = nn.Sequential(
             nn.Linear(head_in_dim, width),
+            nn.LayerNorm(width),
             nn.GELU(),
             nn.Dropout(p=dropout),
             nn.Linear(width, 1),
@@ -141,7 +152,7 @@ class LatentStudent(BaseModule):
         std_z: Optional[Any] = None,
         epsilon: float = 1e-5,
     ):
-        """Set per-channel normalization statistics from training split."""
+        """Set per-channel normalization statistics from the training split."""
         if not HAS_TORCH:
             return
 
@@ -151,17 +162,14 @@ class LatentStudent(BaseModule):
                 return t.view(1, target_channels, 1, 1)
             raise ValueError(f"Expected {target_channels} elements, got {t.numel()}")
 
-        mean_y_t = _to_buffer(mean_y, self.in_channels_y)
-        std_y_t = _to_buffer(std_y, self.in_channels_y).clamp(min=epsilon)
+        self.mean_y.copy_(_to_buffer(mean_y, self.in_channels_y))
+        self.std_y.copy_(_to_buffer(std_y, self.in_channels_y).clamp(min=epsilon))
 
-        self.mean_y.copy_(mean_y_t)
-        self.std_y.copy_(std_y_t)
-
-        if self.config == "B" and mean_z is not None and std_z is not None:
-            mean_z_t = _to_buffer(mean_z, self.in_channels_z)
-            std_z_t = _to_buffer(std_z, self.in_channels_z).clamp(min=epsilon)
-            self.mean_z.copy_(mean_z_t)
-            self.std_z.copy_(std_z_t)
+        if self.config == "B":
+            if mean_z is None or std_z is None:
+                raise ValueError("Config B requires mean_z and std_z normalization statistics.")
+            self.mean_z.copy_(_to_buffer(mean_z, self.in_channels_z))
+            self.std_z.copy_(_to_buffer(std_z, self.in_channels_z).clamp(min=epsilon))
 
     def forward(
         self,
@@ -176,77 +184,66 @@ class LatentStudent(BaseModule):
         if not self.use_mask:
             valid_mask = None
 
-        # Ensure mask is formatted as (B, 1, H, W) float
-        m_f32 = None
+        # Mask as (B, 1, H, W) float32
+        m = None
         if valid_mask is not None:
-            m_f32 = valid_mask.float()
-            if m_f32.ndim == 3:
-                m_f32 = m_f32.unsqueeze(1)
+            m = valid_mask.float()
+            if m.ndim == 3:
+                m = m.unsqueeze(1)
 
-        # 0. Zero out invalid cells in input to guarantee strict mask invariance
-        if m_f32 is not None:
-            y_hat = y_hat * m_f32
+        # 0/1. Zero invalid input cells, then per-channel normalization (re-masked).
+        y = y_hat.float()
+        if m is not None:
+            y = y * m
+        y_norm = (y - self.mean_y) / self.std_y
+        if m is not None:
+            y_norm = y_norm * m
 
-        # 1. Input Normalization
-        y_norm = (y_hat.float() - self.mean_y) / self.std_y
-        if m_f32 is not None:
-            y_norm = y_norm * m_f32
-
-        feat = self.stem_y(y_norm, mask=m_f32)
-
-        # Config B Fusion
+        # Config B: z_hat -> transposed-conv 4x upsample -> concat with y (512 channels)
         if self.config == "B":
             if z_hat is None:
                 raise ValueError("Config B requires z_hat input tensor.")
-            if m_f32 is not None:
-                # Downsample mask for z_hat
-                z_mask = F.interpolate(m_f32, size=(z_hat.size(-2), z_hat.size(-1)), mode="nearest")
-                z_hat = z_hat * z_mask
-                z_norm = ((z_hat.float() - self.mean_z) / self.std_z) * z_mask
-            else:
-                z_norm = (z_hat.float() - self.mean_z) / self.std_z
+            z = z_hat.float()
+            z_mask = None
+            if m is not None:
+                # a z cell is valid if ANY of its y cells is valid
+                z_mask = F.adaptive_max_pool2d(m, (z.size(-2), z.size(-1)))
+                z = z * z_mask
+            z_norm = (z - self.mean_z) / self.std_z
+            if z_mask is not None:
+                z_norm = z_norm * z_mask
+            z_up = self.z_up(z_norm).float()
+            if z_up.shape[-2:] != y_norm.shape[-2:]:
+                z_up = F.interpolate(z_up, size=y_norm.shape[-2:], mode="nearest")
+            inp = torch.cat([y_norm, z_up], dim=1)
+            if m is not None:
+                inp = inp * m
+        else:
+            inp = y_norm
 
-            # Stem Z (downsampled 4x relative to y_hat)
-            feat_z = self.stem_z(z_norm)
-            # Upsample 4x (nearest) to match y_hat grid
-            feat_z_up = F.interpolate(
-                feat_z, size=(feat.size(-2), feat.size(-1)), mode="nearest"
-            )
-            # Concat and 1x1 fuse to width
-            feat = self.fuse_b(torch.cat([feat, feat_z_up], dim=1))
-            if m_f32 is not None:
-                feat = feat * m_f32
+        feat = self.stem(inp, mask=m)
 
-        # 2. Lambda conditioning (Trunk input)
+        # 2. Lambda conditioning: FiLM inside every block + head concat
         e_lambda = None
         if self.lambda_mode == "conditioned":
             if lambda_idx is None:
                 raise ValueError("Conditioned mode requires lambda_idx tensor.")
             e_lambda = self.lambda_embed(lambda_idx)  # (B, lambda_embed_dim)
-            e_trunk = self.lambda_proj(e_lambda)     # (B, width)
-            # Broadcast add into trunk feature map
-            feat = feat + e_trunk.unsqueeze(-1).unsqueeze(-1)
-            if m_f32 is not None:
-                feat = feat * m_f32
 
-        # 3. Trunk feature extraction with inter-layer mask protection
-        feat = self.trunk(feat, mask=m_f32)
+        # 3. Trunk
+        feat = self.trunk(feat, mask=m, cond=e_lambda)
 
         # 4. Pooling in fp32
-        mean_p = self.mean_pool(feat, mask=m_f32).float()  # (B, width)
-        attn_p = self.attn_pool(feat, mask=m_f32).float()  # (B, width)
-        pooled = torch.cat([mean_p, attn_p], dim=1)        # (B, 2 * width)
+        mean_p = self.mean_pool(feat, mask=m).float()
+        attn_p = self.attn_pool(feat, mask=m).float()
+        pooled = torch.cat([mean_p, attn_p], dim=1)
 
         # 5. Head input
-        if self.lambda_mode == "conditioned" and e_lambda is not None:
-            head_in = torch.cat([pooled, e_lambda.float()], dim=1)
-        else:
-            head_in = pooled
+        head_in = torch.cat([pooled, e_lambda.float()], dim=1) if e_lambda is not None else pooled
 
-        # 6. MLP Head explicitly in fp32 outside autocast
+        # 6. MLP head explicitly in fp32 outside autocast
         try:
-            device_type = head_in.device.type
-            amp_ctx = torch.amp.autocast(device_type=device_type, enabled=False)
+            amp_ctx = torch.amp.autocast(device_type=head_in.device.type, enabled=False)
         except (AttributeError, TypeError):
             amp_ctx = torch.cuda.amp.autocast(enabled=False)
 

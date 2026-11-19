@@ -63,10 +63,10 @@ class TestLossOracle(unittest.TestCase):
         self.assertAlmostEqual(details["rank_loss"], 0.20, places=5)
         self.assertEqual(details["num_pairs"], 1.0)
 
-    def test_composite_loss_different_images_ignored(self):
-        # Samples from different images should never form a ranking pair
+    def test_composite_loss_identical_targets_ignored(self):
+        # Samples with identical targets should not form ranking pairs
         predictions = [0.90, 0.50]
-        targets = [0.60, 0.80]
+        targets = [0.70, 0.70]
         lambda_indices = [0, 1]
         image_ids = ["img_001", "img_002"]
 
@@ -76,18 +76,21 @@ class TestLossOracle(unittest.TestCase):
         self.assertEqual(details["num_pairs"], 0.0)
         self.assertAlmostEqual(details["rank_loss"], 0.0)
 
-    def test_composite_loss_teacher_disagreement_ignored(self):
-        # Even if same image, if teacher has targets[1] <= targets[0], pair is ignored
+    def test_composite_loss_alpha_zero_pure_regression(self):
         predictions = [0.80, 0.60]
-        targets = [0.85, 0.70]  # teacher decreases with lambda
-        lambda_indices = [0, 1]
-        image_ids = ["img_001", "img_001"]
-
+        targets = [0.70, 0.85]
         total_loss, details = composite_loss_oracle(
-            predictions, targets, lambda_indices, image_ids, alpha=0.5
+            predictions, targets, alpha=0.0
         )
-        self.assertEqual(details["num_pairs"], 0.0)
-        self.assertAlmostEqual(details["rank_loss"], 0.0)
+        self.assertAlmostEqual(total_loss, details["smooth_l1"])
+
+    def test_composite_loss_alpha_one_pure_ranking(self):
+        predictions = [0.80, 0.60]
+        targets = [0.70, 0.85]
+        total_loss, details = composite_loss_oracle(
+            predictions, targets, alpha=1.0
+        )
+        self.assertAlmostEqual(total_loss, details["rank_loss"])
 
 
 if __name__ == "__main__":

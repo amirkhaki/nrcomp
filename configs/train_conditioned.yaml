@@ -3,22 +3,21 @@ stage: train
 config_name: conditioned_a
 manifest_path: data/manifest.parquet
 latent_store_dir: data/latents
-output_dir: checkpoints/conditioned_a
-history_path: reports/training_conditioned_a_history.csv
-plot_path: reports/training_conditioned_a_curves.png
+target_metric: haarpsi
 
 model:
   config: A  # y_hat only
-  in_channels: 320
+  in_channels_y: 320
   width: 256
   num_res_blocks: 6
   lambda_mode: conditioned
   num_lambdas: 6
   lambda_embed_dim: 256
   dropout: 0.1
+  use_mask: true
 
 loss:
-  smooth_l1_beta: 0.05
+  smooth_l1_beta: 0.01
   alpha_rank: 0.5
   rank_margin: 0.0
 
@@ -35,3 +34,5 @@ training:
   num_workers: 0
   early_stopping_patience: 5
   early_stopping_min_delta: 0.0005
+  min_train_images: 100
+  min_val_images: 30

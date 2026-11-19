@@ -321,6 +321,20 @@ def collate_latent_samples(batch_items: List[Dict[str, Any]]) -> Dict[str, Any]:
     return result
 
 
+def any_pool_mask(mask: Any, out_hw: Tuple[int, int]) -> Any:
+    """Downsample a boolean mask so an output cell is True if ANY covered input cell is True."""
+    import numpy as np
+
+    mask = np.asarray(mask, dtype=bool)
+    out_h, out_w = int(out_hw[0]), int(out_hw[1])
+    block_h = max(1, -(-mask.shape[0] // out_h))
+    block_w = max(1, -(-mask.shape[1] // out_w))
+    padded = np.zeros((out_h * block_h, out_w * block_w), dtype=bool)
+    src = mask[: out_h * block_h, : out_w * block_w]
+    padded[: src.shape[0], : src.shape[1]] = src
+    return padded.reshape(out_h, block_h, out_w, block_w).any(axis=(1, 3))
+
+
 def compute_train_norm_stats(
     dataset: LatentDataset,
     max_samples: int = 500,
@@ -339,7 +353,10 @@ def compute_train_norm_stats(
         Dict with keys 'y' (and 'z' if Config B), mapping to (mean_list, std_list).
     """
     if len(dataset) == 0:
-        return {"y": ([0.0] * 320, [1.0] * 320)}
+        raise ValueError(
+            "Cannot compute normalization statistics: the training dataset is empty. "
+            "Check the manifest split labels (python scripts/audit_manifest.py)."
+        )
 
     rng = random.Random(seed)
     # Stratified sampling across lambdas
@@ -401,7 +418,13 @@ def compute_train_norm_stats(
                     z_sum = np.zeros(c_z, dtype=np.float64)
                     z_sq_sum = np.zeros(c_z, dtype=np.float64)
 
-                flat_z = z.reshape(z.shape[0], -1)
+                # Only valid z cells (a z cell is valid if any of its y cells is valid),
+                # mirroring the y statistics and the model's own z masking.
+                if mask is not None:
+                    z_mask = any_pool_mask(mask, (z.shape[-2], z.shape[-1]))
+                    flat_z = z[:, z_mask]
+                else:
+                    flat_z = z.reshape(z.shape[0], -1)
                 z_sum += np.sum(flat_z, axis=1)
                 z_sq_sum += np.sum(flat_z ** 2, axis=1)
                 z_count += flat_z.shape[1]
@@ -422,6 +445,15 @@ def compute_train_norm_stats(
 
         return result
 
-    # Pure Python fallback for environments without numpy
+    # Offline dev machine without numpy: identity statistics, announced loudly. This path is
+    # unreachable on the execution server (numpy is always installed there).
+    import warnings
+
+    warnings.warn(
+        "numpy is not installed: returning IDENTITY normalization statistics (mean=0, std=1). "
+        "Never use these for real training.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
     c_y = 320
     return {"y": ([0.0] * c_y, [1.0] * c_y)}

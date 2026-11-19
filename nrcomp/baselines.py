@@ -175,6 +175,69 @@ class LambdaBaseline:
         return [self.means.get(l, self.global_mean) for l in lambda_indices]
 
 
+class PerLambdaBppBaseline:
+    """Design E5 (a) / M9 C1: y ~ a_l + b_l * bpp fit separately for every lambda.
+
+    This is the shortcut that matters for the within-lambda headline metric: at fixed lambda,
+    does bitrate alone rank the images? Pure Python (closed-form least squares).
+    """
+
+    def __init__(self):
+        self.coeffs: Dict[int, Tuple[float, float]] = {}  # lambda -> (intercept, slope)
+        self.global_mean: float = 0.0
+
+    def fit(self, bpp: List[float], lambda_indices: List[int], y: List[float]):
+        by_l: Dict[int, Tuple[List[float], List[float]]] = defaultdict(lambda: ([], []))
+        for b, l, v in zip(bpp, lambda_indices, y):
+            by_l[int(l)][0].append(b)
+            by_l[int(l)][1].append(v)
+        self.global_mean = sum(y) / len(y) if y else 0.0
+        self.coeffs = {}
+        for l, (xs, ys) in by_l.items():
+            n = len(xs)
+            mx, my = sum(xs) / n, sum(ys) / n
+            var = sum((x - mx) ** 2 for x in xs)
+            slope = (sum((x - mx) * (v - my) for x, v in zip(xs, ys)) / var) if var > 1e-12 else 0.0
+            self.coeffs[l] = (my - slope * mx, slope)
+
+    def predict(self, bpp: List[float], lambda_indices: List[int]) -> List[float]:
+        out = []
+        for b, l in zip(bpp, lambda_indices):
+            if int(l) in self.coeffs:
+                intercept, slope = self.coeffs[int(l)]
+                out.append(intercept + slope * b)
+            else:
+                out.append(self.global_mean)
+        return out
+
+
+class BppLambdaBaseline:
+    """Design E5 (d) / M9 C2: global gradient boosting on [bpp_actual, lambda_idx]."""
+
+    def __init__(self):
+        self.model = None
+        self._fallback = PerLambdaBppBaseline()
+
+    def fit(self, bpp: List[float], lambda_indices: List[int], y: List[float]):
+        try:
+            import numpy as np
+            from sklearn.ensemble import GradientBoostingRegressor
+
+            self.model = GradientBoostingRegressor(n_estimators=100, max_depth=3, random_state=42)
+            self.model.fit(np.array([[b, float(l)] for b, l in zip(bpp, lambda_indices)]), y)
+            return
+        except ImportError:
+            self.model = None
+        self._fallback.fit(bpp, lambda_indices, y)
+
+    def predict(self, bpp: List[float], lambda_indices: List[int]) -> List[float]:
+        if self.model is not None:
+            import numpy as np
+
+            return self.model.predict(np.array([[b, float(l)] for b, l in zip(bpp, lambda_indices)])).tolist()
+        return self._fallback.predict(bpp, lambda_indices)
+
+
 class LatentStatsBaseline:
     """Baseline (c): Latent summary statistics + bpp_actual to y."""
 

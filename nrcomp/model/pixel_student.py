@@ -35,12 +35,17 @@ class ConvBlock(BaseModule):
 
 
 class ResStage(BaseModule):
-    """Downsample stage with residual connection."""
+    """Downsample stage with residual connection.
+
+    The shortcut MUST always downsample (stride 2) like the main branch, even when the channel
+    count is unchanged; an identity shortcut would add a full-resolution tensor to a
+    half-resolution one and crash (it did for stage3: 256 -> 256).
+    """
 
     def __init__(self, in_channels: int, out_channels: int):
         super().__init__()
         if HAS_TORCH:
-            self.downsample = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=2, bias=False) if in_channels != out_channels else nn.Identity()
+            self.downsample = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=2, bias=False)
             self.conv1 = ConvBlock(in_channels, out_channels, stride=2)
             self.conv2 = ConvBlock(out_channels, out_channels, stride=1)
 

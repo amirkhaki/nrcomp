@@ -180,12 +180,30 @@ train-all-seeds:
 retrain-all: train-all
 
 eval-main:
-	conda run --no-capture-output -n nrcomp-main python -m nrcomp.evaluate \
-		--config configs/evaluate.yaml
+	@if [ "$$CONDA_DEFAULT_ENV" = "nrcomp-main" ]; then \
+		python -m nrcomp.evaluate --config configs/evaluate.yaml; \
+		python scripts/aggregate_seeds.py --seeds 42,43,44; \
+	elif command -v conda >/dev/null && conda info --envs | grep -q "nrcomp-main"; then \
+		conda run --no-capture-output -n nrcomp-main python -m nrcomp.evaluate --config configs/evaluate.yaml; \
+		conda run --no-capture-output -n nrcomp-main python scripts/aggregate_seeds.py --seeds 42,43,44; \
+	elif [ -d ".venv-main" ]; then \
+		.venv-main/bin/python -m nrcomp.evaluate --config configs/evaluate.yaml; \
+		.venv-main/bin/python scripts/aggregate_seeds.py --seeds 42,43,44; \
+	else \
+		python3 -m nrcomp.evaluate --config configs/evaluate.yaml; \
+		python3 scripts/aggregate_seeds.py --seeds 42,43,44; \
+	fi
 
 eval-refs:
-	conda run --no-capture-output -n nrcomp-main python -m nrcomp.eval_pixel_refs \
-		--config configs/eval_refs.yaml
+	@if [ "$$CONDA_DEFAULT_ENV" = "nrcomp-main" ]; then \
+		python -m nrcomp.eval_pixel_refs --config configs/eval_refs.yaml; \
+	elif command -v conda >/dev/null && conda info --envs | grep -q "nrcomp-main"; then \
+		conda run --no-capture-output -n nrcomp-main python -m nrcomp.eval_pixel_refs --config configs/eval_refs.yaml; \
+	elif [ -d ".venv-main" ]; then \
+		.venv-main/bin/python -m nrcomp.eval_pixel_refs --config configs/eval_refs.yaml; \
+	else \
+		python3 -m nrcomp.eval_pixel_refs --config configs/eval_refs.yaml; \
+	fi
 
 codec-sanity:
 	@if command -v conda >/dev/null && conda info --envs | grep -q "nrcomp-codec"; then \

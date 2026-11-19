@@ -18,6 +18,7 @@ from nrcomp.config import load_config
 from nrcomp.data.manifest import ParquetManifest
 from nrcomp.data.store import LatentStore
 from nrcomp.labels.metrics import QualityMetrics
+from nrcomp.lambdas import load_lambdas_config
 
 
 def main():
@@ -94,7 +95,11 @@ def main():
     latent_store = LatentStore(root_dir=PROJECT_ROOT / "data" / "latents")
     wrapper: Optional[ELICWrapper] = None
 
+    # Checkpoint file per lambda index comes from configs/lambdas.yaml (single source of truth).
+    ckpt_by_idx = {int(item["idx"]): item["checkpoint"] for item in load_lambdas_config()}
+
     updated_count = 0
+    failed_rows = []
     for idx, row in enumerate(rows_to_label):
         orig_path = Path(row["orig_path"])
         recon_path = Path(row["recon_path"]) if row.get("recon_path") else None
@@ -118,10 +123,9 @@ def main():
                     if wrapper is None:
                         weights_dir = PROJECT_ROOT / cfg.get("weights_dir", "weights/updated")
                         wrapper = ELICWrapper(weights_dir=weights_dir, device=actual_device)
-                    lambda_idx = row["lambda_idx"]
+                    lambda_idx = int(row["lambda_idx"])
                     if lambda_idx not in wrapper.models:
-                        ckpt_name = f"elic_lambda_{row['lambda_value']}_updated.pth.tar"
-                        wrapper.load_model(lambda_idx, ckpt_name)
+                        wrapper.load_model(lambda_idx, ckpt_by_idx[lambda_idx])
 
                     lat_data = latent_store.load_latents(latent_path)
                     meta = {
@@ -136,6 +140,9 @@ def main():
 
             # Compute metrics
             metric_results = quality_metrics.compute_all(orig_np, recon_np)
+            absent = [m for m in metrics_list if m not in metric_results]
+            if absent:
+                raise RuntimeError(f"metrics not computed: {absent}")
             for m_name, val in metric_results.items():
                 row[m_name] = val
 
@@ -147,11 +154,15 @@ def main():
                 print(f"Labelling progress: {idx + 1}/{len(rows_to_label)} rows processed.", flush=True)
 
         except Exception as e:
+            failed_rows.append((row["image_id"], row["lambda_idx"], str(e)))
             print(f"[!] Error labelling {row['image_id']} lambda={row['lambda_idx']}: {e}", flush=True)
 
     # Final flush
     manifest.flush()
-    print(f"\nLabelling complete! Successfully updated {updated_count} rows in {manifest_path}.", flush=True)
+    print(f"\nLabelling finished: updated {updated_count} rows in {manifest_path}; {len(failed_rows)} failed.", flush=True)
+    if failed_rows:
+        print(f"[ERROR] {len(failed_rows)} rows could not be labelled (first 5: {failed_rows[:5]}).")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -1,15 +1,15 @@
-# Stage 4: Latent Student Training - Ablation A2 (Pure Rank Loss, alpha = 1.0)
+# Ablation A2 (ranking only): alpha = 1 removes the regression term. The output scale is then
+# arbitrary, so only rank metrics are meaningful (RMSE/PLCC rely on the val-fitted mapping).
+# Reference model: conditioned_a (identical except alpha_rank).
 stage: train
 config_name: pure_rank_a
 manifest_path: data/manifest.parquet
 latent_store_dir: data/latents
-output_dir: checkpoints/pure_rank_a
-history_path: reports/training_pure_rank_a_history.csv
-plot_path: reports/training_pure_rank_a_curves.png
+target_metric: haarpsi
 
 model:
-  config: A  # y_hat only
-  in_channels: 320
+  config: A
+  in_channels_y: 320
   width: 256
   num_res_blocks: 6
   lambda_mode: conditioned
@@ -19,8 +19,8 @@ model:
   use_mask: true
 
 loss:
-  smooth_l1_beta: 0.05
-  alpha_rank: 1.0  # Pure pairwise ranking loss (Ablation A2)
+  smooth_l1_beta: 0.01
+  alpha_rank: 1.0  # L = L_rank
   rank_margin: 0.0
 
 training:
@@ -36,3 +36,5 @@ training:
   num_workers: 0
   early_stopping_patience: 5
   early_stopping_min_delta: 0.0005
+  min_train_images: 100
+  min_val_images: 30

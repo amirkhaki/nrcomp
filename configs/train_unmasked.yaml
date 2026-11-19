@@ -1,25 +1,27 @@
-# Stage 4: Latent Student Training - Unmasked Ablation (Config A, Conditioned)
+# Ablation A7 (spatial masking): use_mask=false disables the valid-cell mask everywhere.
+# NOTE: KonIQ images are 1024x768 (multiples of 64), so their masks are all ones and this
+# ablation is informative only on LiveC (500x500 padded to 512). evaluate.py reports the
+# measured valid-cell fraction per split so this is visible in the report.
+# Reference model: conditioned_a (identical except use_mask).
 stage: train
 config_name: unmasked_a
 manifest_path: data/manifest.parquet
 latent_store_dir: data/latents
-output_dir: checkpoints/unmasked_a
-history_path: reports/training_unmasked_a_history.csv
-plot_path: reports/training_unmasked_a_curves.png
+target_metric: haarpsi
 
 model:
-  config: A  # y_hat only
-  in_channels: 320
+  config: A
+  in_channels_y: 320
   width: 256
   num_res_blocks: 6
   lambda_mode: conditioned
   num_lambdas: 6
   lambda_embed_dim: 256
   dropout: 0.1
-  use_mask: false  # Disables spatial masking (Ablation A7)
+  use_mask: false
 
 loss:
-  smooth_l1_beta: 0.05
+  smooth_l1_beta: 0.01
   alpha_rank: 0.5
   rank_margin: 0.0
 
@@ -36,3 +38,5 @@ training:
   num_workers: 0
   early_stopping_patience: 5
   early_stopping_min_delta: 0.0005
+  min_train_images: 100
+  min_val_images: 30

@@ -106,69 +106,57 @@ cd /storage/nrcomp
 git pull origin main
 ```
 
-### Step 2: Backfill MOS & Audit Manifest (Gate M7)
+### Step 2: Rebuild & Audit Manifest Metadata (Gate M7)
+Repair corrupted train/val/test splits and restore true KonIQ (1–5) and LiveC (0–100) MOS:
 ```bash
-# Activate conda main environment
 conda activate nrcomp-main
 
-# Backfill true KonIQ and LiveC MOS into existing manifest
-python scripts/backfill_mos.py --manifest data/manifest.parquet
+# Rebuild manifest metadata and stratified 80/10/10 splits
+python scripts/rebuild_manifest_meta.py --manifest data/manifest.parquet
 
-# Run integrity audit (must exit with returncode 0: [BACKFILL PASS])
+# Run integrity audit (must exit with returncode 0: [AUDIT PASS])
 python scripts/audit_manifest.py --manifest data/manifest.parquet
 ```
 
 ### Step 3: Run Shortcut Baselines
 ```bash
-python scripts/shortcut_baselines.py --manifest data/manifest.parquet --output reports/shortcut_baselines.md
+make run-baselines
 ```
 
-### Step 4: Run Main Evaluation & Generate Verified Artifacts (Gate M8)
+### Step 4: Retrain All Configurations & Ablations Across Seeds
+Trains all 8 models across seeds 42, 43, 44 on the repaired splits:
 ```bash
-# Run comprehensive Stage 5 evaluation suite
-python -m nrcomp.evaluate --config configs/evaluate.yaml --output reports/eval_main.md
-```
-
-### Step 5: Retrain All Configurations & Ablations (New)
-To redo all training with all configurations and ablations in one command:
-```bash
-# Redo all 8 configurations & ablations (seed 42)
-make train-all
-
-# Or redo all configurations across 3 seeds (seeds 42, 43, 44) + auto multi-seed aggregation
 make train-all-seeds
-
-# Or train only the architectural ablations
-make train-ablations
 ```
+*(Alternatively, to run single-seed training first: `make train-all`)*
 
-### Step 6: (Optional Multi-Seed Training & Aggregation Manually)
+### Step 5: Run Main Evaluation & Multi-Seed Aggregation
+Evaluates all models and seeds, computes ensemble metrics, and generates multi-seed aggregation:
 ```bash
-# Train additional seeds (e.g. seeds 43 and 44) if desired:
-python -m nrcomp.train --config configs/student_blind_a.yaml --seed 43
-python -m nrcomp.train --config configs/student_blind_a.yaml --seed 44
-
-# Aggregate seeds:
-python scripts/aggregate_seeds.py --runs-dir reports/runs --models student_blind_a --seeds 42,43,44 --output reports/seed_aggregation.md
+make eval-main
 ```
-```
+This produces:
+- `reports/runs/{model}_seed{seed}/eval_metrics.json` & predictions
+- `reports/runs/{model}_ensemble/eval_metrics.json`
+- `reports/eval_main.md`
+- `reports/seed_aggregation.md` & `reports/seed_aggregation.json`
 
-### Step 3: Run Split-Separated Shortcut Baselines
+### Step 6: Run Pixel References & Ablations Report
 ```bash
-python scripts/shortcut_baselines.py \
-  --manifest data/manifest.parquet \
-  --output reports/shortcut_baselines.md
+make eval-refs
 ```
+This produces:
+- `reports/eval_refs.md`
+- `reports/ablations.md`
 
-### Step 4: Re-evaluate Existing Checkpoints for E3 MOS Verification
-```bash
-# Re-evaluate students on test splits to confirm non-zero orig_mos correlations in E3
-python -m nrcomp.evaluate \
-  --config configs/evaluate.yaml \
-  --output reports/eval_main.md
-```
-
-### Step 5: Confirm Gate Clearance
+### Step 7: Verification & Gate Clearance
 Confirm that:
-1. `audit_manifest.py` prints `[SUCCESS] Manifest audit passed cleanly` and exits with code 0.
-2. In `reports/eval_main.md`, Section 3 (E3) shows non-zero, valid Spearman correlations with `orig_mos`.
+1. `audit_manifest.py` printed `[AUDIT PASS] Manifest passed all integrity checks.` and exited with code 0.
+2. In `reports/eval_main.md`:
+   - All provenance headers show matched SHA-256 hashes.
+   - Primary models (Blind A, Conditioned A, Conditioned B) show valid Within-$\lambda$ SROCC and DS-AUC metrics.
+   - E3 shows valid correlations with `orig_mos`.
+3. In `reports/seed_aggregation.md`:
+   - Shows `3 / 3` seeds found for evaluated models with mean $\pm$ std and ensemble delta gains.
+4. In `reports/ablations.md`:
+   - Shows ablation rows (A2a, A2b, A3, A4, A5, A7, A9) comparing variant vs reference models.

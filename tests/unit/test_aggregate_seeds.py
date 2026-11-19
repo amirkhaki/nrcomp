@@ -29,8 +29,8 @@ class TestAggregateSeeds(unittest.TestCase):
 
         # Empty
         m0, s0 = compute_sample_mean_std([])
-        self.assertEqual(m0, 0.0)
-        self.assertEqual(s0, 0.0)
+        self.assertIsNone(m0)
+        self.assertIsNone(s0)
 
     def test_evaluate_ensemble(self):
         seed_predictions = {

@@ -1,14 +1,23 @@
-"""Composite loss: SmoothL1 regression + intra-image pairwise ranking loss.
+"""Composite loss: point regression + pairwise margin ranking (design.md Section 8).
 
-Per design doc Section 9.3 and Milestone M4 specification:
-- SmoothL1(s, y) with beta=0.05.
-- Ranking loss over pairs (i, j) of the same source image with:
-    lambda_i < lambda_j AND y_j > y_i
-  penalizing ReLU(m - (s_j - s_i)) with margin m = 0.0 and weight alpha = 0.5.
-All calculations executed in float32.
+    L = (1 - alpha) * L_reg(s, y) + alpha * L_rank(s, y)
+
+    L_reg  : Smooth L1 with parameter beta (beta <= 0 degrades to plain L1).
+    L_rank : mean over all unordered batch pairs (i, j) with |y_i - y_j| > min_target_diff of
+             max(0, margin - sign(y_i - y_j) * (s_i - s_j)).
+
+Consequences of the exact formula (the previous implementation used L_reg + alpha * L_rank
+over same-image pairs only, which made "alpha = 1.0" NOT a pure-ranking ablation and never
+trained cross-image ordering at a fixed lambda -- the headline metric):
+    alpha = 0.0 -> regression only        (ablation A2 "no rank")
+    alpha = 1.0 -> ranking only           (ablation A2 "pure rank"; output scale is arbitrary)
+All math runs in float32.
+
+`lambda_indices` and `image_ids` are accepted for API compatibility and diagnostics but do not
+influence the loss: pairs are formed over the whole batch, as the design specifies.
 """
 
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     import torch
@@ -30,75 +39,79 @@ except ImportError:
             return self.forward(*args, **kwargs)
 
 
-class CompositeLoss(BaseModule):
-    """Combines SmoothL1 regression and pairwise ranking loss over same-image pairs."""
+DEFAULT_MIN_TARGET_DIFF = 1e-6
 
-    def __init__(self, alpha: float = 0.5, beta: float = 0.05, margin: float = 0.0):
+
+class CompositeLoss(BaseModule):
+    """(1 - alpha) * SmoothL1 + alpha * pairwise margin ranking over all batch pairs."""
+
+    def __init__(
+        self,
+        alpha: float = 0.5,
+        beta: float = 0.01,
+        margin: float = 0.0,
+        min_target_diff: float = DEFAULT_MIN_TARGET_DIFF,
+    ):
         super().__init__()
+        if not (0.0 <= float(alpha) <= 1.0):
+            raise ValueError(f"alpha must be in [0, 1], got {alpha}")
         self.alpha = float(alpha)
         self.beta = float(beta)
         self.margin = float(margin)
+        self.min_target_diff = float(min_target_diff)
 
     def forward(
         self,
         predictions: "torch.Tensor",
         targets: "torch.Tensor",
-        lambda_indices: "torch.Tensor",
-        image_ids: List[str],
+        lambda_indices: Optional["torch.Tensor"] = None,
+        image_ids: Optional[List[str]] = None,
     ) -> Tuple["torch.Tensor", Dict[str, float]]:
         if not HAS_TORCH:
             raise RuntimeError("PyTorch is required for CompositeLoss.")
 
-        # Enforce float32 for loss precision
         s = predictions.float().view(-1)
         y = targets.float().view(-1)
-        lambdas = lambda_indices.view(-1)
         n = s.size(0)
-
-        # 1. SmoothL1 Regression Loss
-        smooth_l1 = F.smooth_l1_loss(s, y, beta=self.beta)
-
-        # 2. Intra-Source-Image Pairwise Ranking Loss
-        # Build boolean mask for pairs (i, j)
         device = s.device
-        same_image = torch.tensor(
-            [[image_ids[i] == image_ids[j] for j in range(n)] for i in range(n)],
-            dtype=torch.bool,
-            device=device,
-        )
-        lambda_order = lambdas.unsqueeze(1) < lambdas.unsqueeze(0)  # lambda_i < lambda_j
-        target_order = y.unsqueeze(0) > y.unsqueeze(1)              # y_j > y_i
 
-        valid_pairs = same_image & lambda_order & target_order
-
-        if valid_pairs.any():
-            diff = s.unsqueeze(0) - s.unsqueeze(1)  # diff[i, j] = s_j - s_i
-            violations = F.relu(self.margin - diff[valid_pairs])
-            rank_loss = violations.mean()
-            num_pairs = int(valid_pairs.sum().item())
+        # 1. Regression
+        if self.beta <= 0.0:
+            reg = F.l1_loss(s, y)
         else:
-            rank_loss = torch.tensor(0.0, device=device, dtype=torch.float32)
-            num_pairs = 0
+            reg = F.smooth_l1_loss(s, y, beta=self.beta)
 
-        total_loss = smooth_l1 + self.alpha * rank_loss
+        # 2. Pairwise ranking over all unordered pairs with distinguishable targets
+        diff_y = y.unsqueeze(1) - y.unsqueeze(0)  # [i, j] = y_i - y_j
+        diff_s = s.unsqueeze(1) - s.unsqueeze(0)  # [i, j] = s_i - s_j
+        upper = torch.triu(torch.ones(n, n, dtype=torch.bool, device=device), diagonal=1)
+        valid = upper & (diff_y.abs() > self.min_target_diff)
+        num_pairs = int(valid.sum().item())
+        if num_pairs > 0:
+            violations = F.relu(self.margin - torch.sign(diff_y) * diff_s)[valid]
+            rank = violations.mean()
+        else:
+            rank = torch.zeros((), device=device, dtype=torch.float32)
 
-        loss_dict = {
-            "loss": float(total_loss.detach().item()),
-            "smooth_l1": float(smooth_l1.detach().item()),
-            "rank_loss": float(rank_loss.detach().item()),
+        total = (1.0 - self.alpha) * reg + self.alpha * rank
+
+        return total, {
+            "loss": float(total.detach().item()),
+            "smooth_l1": float(reg.detach().item()),
+            "rank_loss": float(rank.detach().item()),
             "num_pairs": float(num_pairs),
         }
-
-        return total_loss, loss_dict
 
 
 # ---------------------------------------------------------------------------
 # Pure-Python Reference Oracle (for offline testing & verification)
 # ---------------------------------------------------------------------------
 
-def smooth_l1_oracle(pred: float, target: float, beta: float = 0.05) -> float:
-    """Pure-Python SmoothL1 loss for a single value pair."""
+def smooth_l1_oracle(pred: float, target: float, beta: float = 0.01) -> float:
+    """Pure-Python SmoothL1 for one value pair (beta <= 0 -> L1)."""
     diff = abs(pred - target)
+    if beta <= 0.0:
+        return diff
     if diff < beta:
         return 0.5 * (diff ** 2) / beta
     return diff - 0.5 * beta
@@ -107,45 +120,35 @@ def smooth_l1_oracle(pred: float, target: float, beta: float = 0.05) -> float:
 def composite_loss_oracle(
     predictions: List[float],
     targets: List[float],
-    lambda_indices: List[int],
-    image_ids: List[str],
+    lambda_indices: Optional[List[int]] = None,
+    image_ids: Optional[List[str]] = None,
     alpha: float = 0.5,
-    beta: float = 0.05,
+    beta: float = 0.01,
     margin: float = 0.0,
+    min_target_diff: float = DEFAULT_MIN_TARGET_DIFF,
 ) -> Tuple[float, Dict[str, float]]:
     """Pure-Python reference oracle for CompositeLoss."""
     n = len(predictions)
     if n == 0:
         return 0.0, {"loss": 0.0, "smooth_l1": 0.0, "rank_loss": 0.0, "num_pairs": 0.0}
 
-    # Mean SmoothL1
-    smooth_l1_vals = [smooth_l1_oracle(p, t, beta=beta) for p, t in zip(predictions, targets)]
-    smooth_l1 = sum(smooth_l1_vals) / n
+    reg = sum(smooth_l1_oracle(p, t, beta=beta) for p, t in zip(predictions, targets)) / n
 
-    # Ranking loss over valid pairs
     violations = []
     for i in range(n):
-        for j in range(n):
-            if (
-                image_ids[i] == image_ids[j]
-                and lambda_indices[i] < lambda_indices[j]
-                and targets[j] > targets[i]
-            ):
-                diff = predictions[j] - predictions[i]
-                v = max(0.0, margin - diff)
-                violations.append(v)
+        for j in range(i + 1, n):
+            dy = targets[i] - targets[j]
+            if abs(dy) <= min_target_diff:
+                continue
+            sign = 1.0 if dy > 0 else -1.0
+            ds = predictions[i] - predictions[j]
+            violations.append(max(0.0, margin - sign * ds))
 
-    if violations:
-        rank_loss = sum(violations) / len(violations)
-        num_pairs = len(violations)
-    else:
-        rank_loss = 0.0
-        num_pairs = 0
-
-    total_loss = smooth_l1 + alpha * rank_loss
-    return total_loss, {
-        "loss": total_loss,
-        "smooth_l1": smooth_l1,
-        "rank_loss": rank_loss,
-        "num_pairs": float(num_pairs),
+    rank = (sum(violations) / len(violations)) if violations else 0.0
+    total = (1.0 - alpha) * reg + alpha * rank
+    return total, {
+        "loss": total,
+        "smooth_l1": reg,
+        "rank_loss": rank,
+        "num_pairs": float(len(violations)),
     }

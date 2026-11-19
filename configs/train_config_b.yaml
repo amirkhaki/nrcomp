@@ -1,14 +1,12 @@
-# Stage 4: Latent Student Training - Config B (y_hat + z_hat)
+# Stage 4: Latent Student Training - Config B (y_hat + z_hat), conditioned
 stage: train
 config_name: conditioned_b
 manifest_path: data/manifest.parquet
 latent_store_dir: data/latents
-output_dir: checkpoints/conditioned_b
-history_path: reports/training_conditioned_b_history.csv
-plot_path: reports/training_conditioned_b_curves.png
+target_metric: haarpsi
 
 model:
-  config: B  # y_hat (320) + 4x upsampled z_hat (192)
+  config: B  # y_hat (320) + transposed-conv 4x upsampled z_hat (192) -> 512 channels
   in_channels_y: 320
   in_channels_z: 192
   width: 256
@@ -17,9 +15,10 @@ model:
   num_lambdas: 6
   lambda_embed_dim: 256
   dropout: 0.1
+  use_mask: true
 
 loss:
-  smooth_l1_beta: 0.05
+  smooth_l1_beta: 0.01
   alpha_rank: 0.5
   rank_margin: 0.0
 
@@ -36,3 +35,5 @@ training:
   num_workers: 0
   early_stopping_patience: 5
   early_stopping_min_delta: 0.0005
+  min_train_images: 100
+  min_val_images: 30
