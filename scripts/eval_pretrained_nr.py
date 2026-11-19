@@ -438,8 +438,8 @@ def materialize_missing_recon(
             lambdas_cfg = load_lambdas_config()
             ckpt_by_idx = {int(x["idx"]): x["checkpoint"] for x in lambdas_cfg}
             weights_dir = project_root / "weights" / "updated"
-            decoder_state["wrapper"] = ELICWrapper(weights_dir=weights_dir, device=device)
-            decoder_state["latent_store"] = LatentStore()
+            decoder_state["wrapper"] = ELICWrapper(weights_dir=weights_dir, device=str(device))
+            decoder_state["latent_store"] = LatentStore(root_dir=project_root / "data" / "latents")
             decoder_state["ckpt_by_idx"] = ckpt_by_idx
         except Exception as e:
             decoder_state["wrapper"] = None

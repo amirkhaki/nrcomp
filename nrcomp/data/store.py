@@ -34,8 +34,12 @@ def check_disk_space(
 class LatentStore:
     """I/O interface for saving and loading codec latents in fp16."""
 
-    def __init__(self, root_dir: Union[str, Path], store_format: str = "npz"):
-        self.root_dir = Path(root_dir)
+    def __init__(
+        self,
+        root_dir: Optional[Union[str, Path]] = None,
+        store_format: str = "npz",
+    ):
+        self.root_dir = Path(root_dir) if root_dir is not None else (PROJECT_ROOT / "data" / "latents")
         self.store_format = store_format
 
     def get_path(
