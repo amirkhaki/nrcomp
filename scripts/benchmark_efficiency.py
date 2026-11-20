@@ -242,6 +242,8 @@ def run_live_gpu_benchmarking(
     warmup_runs: int = 20,
     test_runs: int = 100,
     quick: bool = False,
+    profile_pretrained: bool = True,
+    nr_models: Optional[List[str]] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """Run live hardware profiling on an available CUDA GPU."""
     import torch
@@ -465,6 +467,106 @@ def run_live_gpu_benchmarking(
     except Exception as e:
         print(f"      [INFO] Pixel student profiling skipped: {e}")
 
+    # 6. Pretrained NR Models (CLIPIQA, MUSIQ, MANIQA, NIQE, BRISQUE) via pyiqa
+    if profile_pretrained:
+        target_nr_models = nr_models or ["clipiqa", "musiq", "maniqa", "niqe", "brisque"]
+        print("\n[6/6] Live Profiling Pretrained NR Models (pyiqa)...", flush=True)
+        try:
+            import pyiqa
+            from PIL import Image
+            import tempfile
+
+            dummy_rgb = torch.zeros((1, 3, h_orig, w_orig), device=device)
+            elic_decode_ms = data.get("elic_synthesis_only", {}).get("latency_bs1_ms", 0.0)
+            elic_decode_flops = data.get("elic_synthesis_only", {}).get("model_gflops", 0.0)
+
+            # Create a reusable temporary image file in case a metric requires a file path
+            tmp_img = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+            tmp_img_p = Path(tmp_img.name)
+            Image.new("RGB", (w_orig, h_orig), color=(128, 128, 128)).save(tmp_img_p)
+
+            for m_name in target_nr_models:
+                m_lower = m_name.lower().strip()
+                print(f"      [{m_lower.upper()}] Loading model on {device}...", end="", flush=True)
+                try:
+                    metric = pyiqa.create_metric(m_lower, device=device)
+                    if hasattr(metric, "eval"):
+                        metric.eval()
+
+                    params_count = 0
+                    if hasattr(metric, "parameters"):
+                        try:
+                            params_count = sum(p.numel() for p in metric.parameters())
+                        except Exception:
+                            pass
+                    params_m = round(params_count / 1e6, 2) if params_count > 0 else None
+
+                    # Check whether metric accepts direct tensor or file path
+                    use_tensor = True
+                    try:
+                        with torch.no_grad():
+                            res = metric(dummy_rgb)
+                            if isinstance(res, torch.Tensor) and torch.isnan(res).any():
+                                use_tensor = False
+                    except Exception:
+                        use_tensor = False
+
+                    if use_tensor:
+                        def _forward_call():
+                            with torch.no_grad():
+                                return metric(dummy_rgb)
+                    else:
+                        def _forward_call():
+                            with torch.no_grad():
+                                return metric(str(tmp_img_p))
+
+                    # FLOPs and GMACs profiling
+                    gmacs, gflops, flop_src = measure_torch_flops_and_macs(_forward_call)
+                    if gflops is None:
+                        if params_count == 0:
+                            flop_src = "Classical algorithm (non-neural)"
+                        else:
+                            flop_src = "Unmeasured"
+
+                    # Measure latency
+                    p_warmup = 1 if quick else 2
+                    p_iters = 3 if quick else 5
+                    fwd_lat_ms = profile_torch_fn_latency(_forward_call, warmup_runs=p_warmup, test_runs=p_iters)
+                    tot_lat_ms = elic_decode_ms + fwd_lat_ms if elic_decode_ms else fwd_lat_ms
+                    th_img = 1000.0 / tot_lat_ms if tot_lat_ms > 0 else 0.0
+                    tot_flops = round(gflops + elic_decode_flops, 2) if (gflops is not None and elic_decode_flops is not None) else None
+
+                    fl_disp = f"{gflops:.2f} GFLOPs ({gmacs:.2f} GMACs)" if gflops is not None else "N/A"
+                    par_disp = f"{params_m:.2f}M" if params_m is not None else "0.0M"
+                    print(f" Profiled! FLOPs: {fl_disp} [{flop_src}] | Params: {par_disp} | Forward: {fwd_lat_ms:.2f} ms | Pipeline: {tot_lat_ms:.2f} ms")
+
+                    data[f"pretrained_{m_lower}"] = {
+                        "name": f"Pretrained {m_lower.upper()} (decode + model)",
+                        "domain": "Decoded RGB Pixels",
+                        "params_m": params_m,
+                        "model_gmacs": gmacs,
+                        "model_gflops": gflops,
+                        "total_gflops": tot_flops,
+                        "flop_profiler": flop_src,
+                        "latency_bs1_ms": tot_lat_ms,
+                        "latency_bs16_ms": None,
+                        "throughput_img_s": th_img,
+                        "model_forward_ms": fwd_lat_ms,
+                        "requires_synthesis": True,
+                    }
+                except Exception as e_m:
+                    print(f" Skipped ({e_m})")
+                finally:
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+
+            try:
+                tmp_img_p.unlink()
+            except Exception:
+                pass
+        except Exception as e:
+            print(f"      [INFO] Pretrained NR live profiling skipped: {e}")
+
     print("\n" + "=" * 80)
     print(" Live Hardware Benchmarking Complete!")
     print("=" * 80)
@@ -494,17 +596,18 @@ def format_efficiency_report(
     lines.append("## 1. Computational Complexity & Parameters")
     lines.append("")
     lines.append(
-        "| Method | Input Domain | GMACs | GFLOPs | Parameters (M) | FLOP Profiler |"
+        "| Method | Input Domain | Model GMACs | Model GFLOPs | Total GFLOPs (incl. decode) | Parameters (M) | FLOP Profiler |"
     )
-    lines.append("| :--- | :---: | :---: | :---: | :---: | :---: |")
+    lines.append("| :--- | :---: | :---: | :---: | :---: | :---: | :---: |")
 
     for k, d in data.items():
         gmacs_str = f"{d['model_gmacs']:.2f}" if d.get('model_gmacs') is not None else "n/a"
         gflops_str = f"{d['model_gflops']:.2f}" if d.get('model_gflops') is not None else "n/a"
-        params_str = f"{d['params_m']:.2f}M" if d.get('params_m') is not None else "n/a"
+        tot_gflops = f"**{d['total_gflops']:.2f}**" if d.get('total_gflops') is not None else (f"**{gflops_str}**" if gflops_str != "n/a" else "n/a")
+        params_str = f"{d['params_m']:.2f}M" if d.get('params_m') is not None else ("0.00M" if d.get('flop_profiler') == "Classical algorithm (non-neural)" else "n/a")
         profiler = d.get('flop_profiler', 'Analytical formula')
         lines.append(
-            f"| **{d['name']}** | {d['domain']} | {gmacs_str} | **{gflops_str}** | {params_str} | {profiler} |"
+            f"| **{d['name']}** | {d['domain']} | {gmacs_str} | {gflops_str} | {tot_gflops} | {params_str} | {profiler} |"
         )
 
     lines.append("")
@@ -564,6 +667,13 @@ def format_efficiency_report(
     lines.append(
         f"3. **Parameter Footprint:** Latent Student Conditioned A has **{cond_a.get('params_m', 4.3):.2f}M parameters**."
     )
+    for m in ["clipiqa", "musiq", "maniqa"]:
+        pm = data.get(f"pretrained_{m}")
+        if pm and pm.get("model_gflops") and flops_a:
+            lines.append(
+                f"- **vs Pretrained {m.upper()}:** Standalone model forward requires **{pm['model_gflops']:.2f} GFLOPs** "
+                f"({pm.get('total_gflops', 0):.2f} GFLOPs end-to-end with decode), vs **{flops_a:.2f} GFLOPs** for Latent Student."
+            )
     lines.append("")
     return "\n".join(lines)
 
@@ -576,6 +686,8 @@ def main():
     parser.add_argument("--warmup", type=int, default=20, help="Number of warmup iterations per model.")
     parser.add_argument("--iters", type=int, default=100, help="Number of timed benchmark iterations per model.")
     parser.add_argument("--quick", action="store_true", help="Quick mode (fewer iterations for fast feedback).")
+    parser.add_argument("--nr-models", type=str, default="clipiqa,musiq,maniqa,niqe,brisque", help="Pretrained NR models to profile.")
+    parser.add_argument("--skip-pretrained", action="store_true", help="Skip profiling pretrained NR models.")
     args = parser.parse_args()
 
     out_p = PROJECT_ROOT / args.output if not Path(args.output).is_absolute() else Path(args.output)
@@ -591,10 +703,13 @@ def main():
             has_cuda = False
 
     if has_cuda:
+        nr_models_list = [m.strip() for m in args.nr_models.split(",") if m.strip()] if args.nr_models else []
         data = run_live_gpu_benchmarking(
             warmup_runs=args.warmup,
             test_runs=args.iters,
             quick=args.quick,
+            profile_pretrained=not args.skip_pretrained,
+            nr_models=nr_models_list,
         )
     else:
         print("[INFO] CUDA device not available or offline mode requested.")

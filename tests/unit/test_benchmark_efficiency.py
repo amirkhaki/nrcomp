@@ -90,6 +90,41 @@ class TestBenchmarkEfficiency(unittest.TestCase):
         self.assertIn("Throughput", md)
         self.assertNotIn("CLIPIQA", md)
 
+    def test_format_efficiency_report_with_pretrained_models(self):
+        prov_header = "<!-- PROVENANCE HEADER -->"
+        sample_data = {
+            "student_conditioned_a": {
+                "name": "Student Conditioned A (y_hat + lambda)",
+                "domain": "Codec Latents",
+                "params_m": 4.30,
+                "model_gmacs": 10.15,
+                "model_gflops": 20.30,
+                "total_gflops": 20.30,
+                "flop_profiler": "PyTorch FlopCounterMode (live)",
+                "latency_bs1_ms": 7.28,
+                "latency_bs16_ms": 7.21,
+                "throughput_img_s": 138.7,
+            },
+            "pretrained_clipiqa": {
+                "name": "Pretrained CLIPIQA (decode + model)",
+                "domain": "Decoded RGB Pixels",
+                "params_m": 149.60,
+                "model_gmacs": 14.40,
+                "model_gflops": 28.80,
+                "total_gflops": 313.80,
+                "flop_profiler": "PyTorch FlopCounterMode (live)",
+                "latency_bs1_ms": 135.50,
+                "latency_bs16_ms": None,
+                "throughput_img_s": 7.4,
+            },
+        }
+        md = format_efficiency_report(prov_header, sample_data)
+        self.assertIn("Pretrained CLIPIQA", md)
+        self.assertIn("14.40", md)
+        self.assertIn("28.80", md)
+        self.assertIn("313.80", md)
+
+
     def test_end_to_end_script_execution(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             md_path = Path(tmpdir) / "test_efficiency.md"
