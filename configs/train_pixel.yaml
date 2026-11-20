@@ -1,0 +1,36 @@
+# Stage 6: Pixel Student Reference Training (E1 / E6a)
+stage: train
+config_name: pixel_student_conditioned
+manifest_path: data/manifest.parquet
+latent_store_dir: data/latents
+recon_dir: data/recons
+target_metric: haarpsi
+
+model:
+  in_channels: 3
+  base_channels: 64
+  lambda_mode: conditioned
+  num_lambdas: 6
+  lambda_embed_dim: 64
+  dropout: 0.1
+
+loss:
+  smooth_l1_beta: 0.01
+  alpha_rank: 0.5
+  rank_margin: 0.0
+
+training:
+  epochs: 40
+  warmup_epochs: 2
+  batch_images: 4
+  lambdas_per_image: 2
+  lr: 0.0003
+  weight_decay: 0.05
+  grad_clip: 1.0
+  precision: fp32
+  seed: 42
+  num_workers: 0
+  early_stopping_patience: 6
+  early_stopping_min_delta: 0.0005
+  min_train_images: 100
+  min_val_images: 30

@@ -228,6 +228,17 @@ benchmark-efficiency:
 		python3 scripts/benchmark_efficiency.py; \
 	fi
 
+train-pixel-student:
+	@if [ "$$CONDA_DEFAULT_ENV" = "nrcomp-main" ]; then \
+		python scripts/train_pixel_student.py --config configs/train_pixel.yaml; \
+	elif command -v conda >/dev/null && conda info --envs | grep -q "nrcomp-main"; then \
+		conda run --no-capture-output -n nrcomp-main python scripts/train_pixel_student.py --config configs/train_pixel.yaml; \
+	elif [ -d ".venv-main" ]; then \
+		.venv-main/bin/python scripts/train_pixel_student.py --config configs/train_pixel.yaml; \
+	else \
+		python3 scripts/train_pixel_student.py --config configs/train_pixel.yaml; \
+	fi
+
 codec-sanity:
 	@if command -v conda >/dev/null && conda info --envs | grep -q "nrcomp-codec"; then \
 		conda run --no-capture-output -n nrcomp-codec python scripts/codec_sanity.py --config configs/codec_sanity.yaml; \

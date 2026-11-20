@@ -142,6 +142,7 @@ def format_pixel_refs_report(
     pixel_student_run: Optional[Dict[str, Any]],
     pretrained_nr_runs: Dict[str, Optional[Dict[str, Any]]],
     latency_stats: Optional[Dict[str, float]],
+    runs_dir: Optional[Union[Path, Dict[str, Any]]] = None,
 ) -> str:
     """eval_refs.md, strictly from loaded artifacts."""
     if isinstance(provenance_header, dict):
@@ -180,15 +181,31 @@ def format_pixel_refs_report(
     lines.append("")
     lines.append("| Model | Domain | KonIQ test within-λ | LiveC test within-λ |")
     lines.append("| :--- | :---: | :---: | :---: |")
-    rows = [("Latent student (Conditioned B, ensemble)", "Quantized latents", latent_student_run),
-            ("Pixel student (custom CNN)", "Decoded pixels", pixel_student_run)]
-    rows += [(f"Pretrained {n.upper()}", "Decoded pixels", d) for n, d in pretrained_nr_runs.items()]
-    for label, domain, doc in rows:
-        if doc is None:
-            lines.append(f"| {label} | {domain} | {NOT_RUN} | {NOT_RUN} |")
+
+    # Headline: seed mean ± std for Latent Student Conditioned B
+    if runs_dir:
+        mean_k, std_k, n_k = _seed_stat("conditioned_b", "koniq_test", runs_dir)
+        mean_l, std_l, n_l = _seed_stat("conditioned_b", "livec_test", runs_dir)
+        if mean_k is not None:
+            lines.append(f"| **Latent student (Conditioned B, seed mean ± std)** | Quantized latents | **{_fmt_stat(mean_k, std_k, n_k)}** | **{_fmt_stat(mean_l, std_l, n_l)}** |")
+            lines.append(f"| ↳ Latent student (Conditioned B, ensemble) | Quantized latents | {_fmt(_split_metric(latent_student_run, 'koniq_test', 'within_lambda_srocc'))} | {_fmt(_split_metric(latent_student_run, 'livec_test', 'within_lambda_srocc'))} |")
         else:
-            lines.append(f"| {label} | {domain} | {_fmt(_split_metric(doc, 'koniq_test', 'within_lambda_srocc'))} | "
-                         f"{_fmt(_split_metric(doc, 'livec_test', 'within_lambda_srocc'))} |")
+            lines.append(f"| Latent student (Conditioned B, ensemble) | Quantized latents | {_fmt(_split_metric(latent_student_run, 'koniq_test', 'within_lambda_srocc'))} | {_fmt(_split_metric(latent_student_run, 'livec_test', 'within_lambda_srocc'))} |")
+    else:
+        lines.append(f"| Latent student (Conditioned B, ensemble) | Quantized latents | {_fmt(_split_metric(latent_student_run, 'koniq_test', 'within_lambda_srocc'))} | {_fmt(_split_metric(latent_student_run, 'livec_test', 'within_lambda_srocc'))} |")
+
+    # Pixel student
+    if pixel_student_run:
+        lines.append(f"| Pixel student (custom CNN) | Decoded pixels | {_fmt(_split_metric(pixel_student_run, 'koniq_test', 'within_lambda_srocc'))} | {_fmt(_split_metric(pixel_student_run, 'livec_test', 'within_lambda_srocc'))} |")
+    else:
+        lines.append(f"| Pixel student (custom CNN) | Decoded pixels | {NOT_RUN} | {NOT_RUN} |")
+
+    # Pretrained NR models
+    for n, d in pretrained_nr_runs.items():
+        if d is None:
+            lines.append(f"| Pretrained {n.upper()} | Decoded pixels | {NOT_RUN} | {NOT_RUN} |")
+        else:
+            lines.append(f"| Pretrained {n.upper()} | Decoded pixels | {_fmt(_split_metric(d, 'koniq_test', 'within_lambda_srocc'))} | {_fmt(_split_metric(d, 'livec_test', 'within_lambda_srocc'))} |")
     lines.append("")
     return "\n".join(lines)
 
@@ -289,7 +306,7 @@ def main():
     prov = collect_provenance(config_path=cfg_path, manifest_path=manifest_path, seeds=runs.DEFAULT_SEEDS, input_artifacts=artifacts)
     header = format_provenance_header(prov, "Stage 6 Provenance")
 
-    out_refs.write_text(format_pixel_refs_report(header, latent, pixel, pretrained, latency_stats), encoding="utf-8")
+    out_refs.write_text(format_pixel_refs_report(header, latent, pixel, pretrained, latency_stats, runs_dir=runs_dir), encoding="utf-8")
     print(f"[SUCCESS] Pixel references report written to {out_refs}")
 
     abl_artifacts = [str(p) for p in sorted(runs_dir.glob("*/eval_metrics.json"))]

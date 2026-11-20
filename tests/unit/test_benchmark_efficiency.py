@@ -4,8 +4,8 @@ import unittest
 from pathlib import Path
 
 from scripts.benchmark_efficiency import (
-    COMPLEXITY_REFERENCE_DATA,
     compute_latent_student_theoretical_complexity,
+    compute_pixel_student_theoretical_complexity,
     format_efficiency_report,
 )
 
@@ -37,28 +37,83 @@ class TestBenchmarkEfficiency(unittest.TestCase):
         self.assertGreater(res["params_millions"], 4.5)
         self.assertLess(res["params_millions"], 5.5)
 
+    def test_theoretical_complexity_pixel_student(self):
+        res = compute_pixel_student_theoretical_complexity(conditioned=True)
+        self.assertGreater(res["params_millions"], 2.0)
+        self.assertLess(res["params_millions"], 3.0)
+        self.assertGreater(res["gflops"], 40.0)
+
     def test_format_report(self):
         prov_header = "<!-- PROVENANCE HEADER START -->\n<!-- PROVENANCE HEADER END -->\n"
-        md = format_efficiency_report(prov_header, COMPLEXITY_REFERENCE_DATA)
+        sample_data = {
+            "student_blind_a": {
+                "name": "Student Blind A (y_hat)",
+                "domain": "Codec Latents",
+                "params_m": 3.44,
+                "model_gmacs": 10.15,
+                "model_gflops": 20.29,
+                "total_gflops": 20.29,
+                "flop_profiler": "Analytical formula",
+                "latency_bs1_ms": 7.34,
+                "latency_bs16_ms": 7.30,
+                "throughput_img_s": 137.0,
+            },
+            "student_conditioned_a": {
+                "name": "Student Conditioned A (y_hat + lambda)",
+                "domain": "Codec Latents",
+                "params_m": 4.30,
+                "model_gmacs": 10.15,
+                "model_gflops": 20.30,
+                "total_gflops": 20.30,
+                "flop_profiler": "Analytical formula",
+                "latency_bs1_ms": 7.28,
+                "latency_bs16_ms": 7.21,
+                "throughput_img_s": 138.7,
+            },
+            "elic_synthesis_only": {
+                "name": "ELIC Synthesis Decoder (decode_from_latents)",
+                "domain": "Latents -> RGB Pixels",
+                "params_m": 32.40,
+                "model_gmacs": 142.50,
+                "model_gflops": 285.00,
+                "total_gflops": 285.00,
+                "flop_profiler": "Measured",
+                "latency_bs1_ms": 28.50,
+                "latency_bs16_ms": 27.80,
+                "throughput_img_s": 35.1,
+            },
+        }
+        md = format_efficiency_report(prov_header, sample_data)
         self.assertIn("# Model Computational Complexity & Efficiency Benchmark", md)
         self.assertIn("Student Conditioned A", md)
-        self.assertIn("Pretrained CLIPIQA", md)
-        self.assertIn("Total GFLOPs", md)
+        self.assertIn("ELIC Synthesis Decoder", md)
         self.assertIn("Throughput", md)
-        # Verify no orphan "> " broken lines
-        self.assertNotIn("from > quantized", md)
+        self.assertNotIn("CLIPIQA", md)
 
     def test_end_to_end_script_execution(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             md_path = Path(tmpdir) / "test_efficiency.md"
             json_path = Path(tmpdir) / "test_efficiency.json"
-            
-            # Format and save
+
+            sample_data = {
+                "student_conditioned_a": {
+                    "name": "Student Conditioned A (y_hat + lambda)",
+                    "domain": "Codec Latents",
+                    "params_m": 4.30,
+                    "model_gmacs": 10.15,
+                    "model_gflops": 20.30,
+                    "total_gflops": 20.30,
+                    "flop_profiler": "Analytical formula",
+                    "latency_bs1_ms": 7.28,
+                    "latency_bs16_ms": 7.21,
+                    "throughput_img_s": 138.7,
+                }
+            }
             prov_header = "<!-- PROVENANCE HEADER -->"
-            report_md = format_efficiency_report(prov_header, COMPLEXITY_REFERENCE_DATA)
+            report_md = format_efficiency_report(prov_header, sample_data)
             md_path.write_text(report_md, encoding="utf-8")
             with open(json_path, "w", encoding="utf-8") as f:
-                json.dump(COMPLEXITY_REFERENCE_DATA, f)
+                json.dump(sample_data, f)
 
             self.assertTrue(md_path.exists())
             self.assertTrue(json_path.exists())

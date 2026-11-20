@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """Computational Complexity and Efficiency Benchmark (E8 / Milestone M11).
 
-Measures and compares:
+Measures and compares ONLY empirically verified / measured values:
 1. Model Parameters (Millions)
 2. Computational Complexity: Multiply-Accumulate Operations (GMACs) and FLOPs (GFLOPs)
-3. Synthesis Decoding Overhead (ELIC g_s)
+3. Synthesis Decoding Overhead (ELIC g_s via decode_from_latents)
 4. Inference Latency (Batch Size 1 & 16 in ms/image) and Throughput (img/s)
-5. Memory / Latent Footprint
 
-Runs dynamic GPU hardware profiling when CUDA is available, and falls back to
-exact analytical calculations and verified reference timings in offline mode.
+Strictly reports measured values from live PyTorch execution on GPU, with exact
+analytical layer calculations for offline validation.
 """
 
 import argparse
@@ -190,164 +189,12 @@ def compute_pixel_student_theoretical_complexity(
     }
 
 
-# Standard literature and profiled specifications (baseline defaults)
-COMPLEXITY_REFERENCE_DATA: Dict[str, Dict[str, Any]] = {
-    "student_blind_a": {
-        "name": "Student Blind A (y_hat)",
-        "domain": "Codec Latents",
-        "requires_synthesis": False,
-        "params_m": 3.44,
-        "model_gmacs": 10.15,
-        "model_gflops": 20.29,
-        "synthesis_gflops": 0.0,
-        "total_gflops": 20.29,
-        "latency_bs1_ms": 6.77,
-        "latency_bs16_ms": 6.80,
-        "throughput_img_s": 147.1,
-        "flop_profiler": "PyTorch FlopCounterMode / Analytical",
-    },
-    "student_conditioned_a": {
-        "name": "Student Conditioned A (y_hat + lambda)",
-        "domain": "Codec Latents",
-        "requires_synthesis": False,
-        "params_m": 4.30,
-        "model_gmacs": 10.15,
-        "model_gflops": 20.30,
-        "synthesis_gflops": 0.0,
-        "total_gflops": 20.30,
-        "latency_bs1_ms": 7.28,
-        "latency_bs16_ms": 7.21,
-        "throughput_img_s": 138.7,
-        "flop_profiler": "PyTorch FlopCounterMode / Analytical",
-    },
-    "student_conditioned_b": {
-        "name": "Student Conditioned B (y_hat + z_hat + lambda)",
-        "domain": "Codec Latents",
-        "requires_synthesis": False,
-        "params_m": 4.94,
-        "model_gmacs": 10.41,
-        "model_gflops": 20.83,
-        "synthesis_gflops": 0.0,
-        "total_gflops": 20.83,
-        "latency_bs1_ms": 7.32,
-        "latency_bs16_ms": 7.31,
-        "throughput_img_s": 136.8,
-        "flop_profiler": "PyTorch FlopCounterMode / Analytical",
-    },
-    "pixel_student_conditioned": {
-        "name": "Pixel Student (RGB CNN + lambda)",
-        "domain": "Decoded Pixels",
-        "requires_synthesis": True,
-        "params_m": 2.21,
-        "model_gmacs": 11.20,
-        "model_gflops": 22.40,
-        "synthesis_gflops": 285.00,
-        "total_gflops": 307.40,
-        "latency_bs1_ms": 36.50,
-        "latency_bs16_ms": 35.20,
-        "throughput_img_s": 27.4,
-        "flop_profiler": "PyTorch FlopCounterMode / Analytical",
-    },
-    "elic_synthesis_only": {
-        "name": "ELIC Synthesis Decoder (g_s only)",
-        "domain": "Bitstream -> RGB",
-        "requires_synthesis": True,
-        "params_m": 32.40,
-        "model_gmacs": 142.50,
-        "model_gflops": 285.00,
-        "synthesis_gflops": 285.00,
-        "total_gflops": 285.00,
-        "latency_bs1_ms": 28.50,
-        "latency_bs16_ms": 27.80,
-        "throughput_img_s": 35.1,
-        "flop_profiler": "Codec Architecture (ELIC g_s)",
-    },
-    "pretrained_clipiqa": {
-        "name": "Pretrained CLIPIQA (OpenAI ViT-B/32)",
-        "domain": "Decoded Pixels",
-        "requires_synthesis": True,
-        "params_m": 149.60,
-        "model_gmacs": 14.40,
-        "model_gflops": 28.80,
-        "synthesis_gflops": 285.00,
-        "total_gflops": 313.80,
-        "latency_bs1_ms": 220.80,
-        "latency_bs16_ms": 172.80,
-        "throughput_img_s": 5.8,
-        "flop_profiler": "ViT-B/32 Specification",
-    },
-    "pretrained_musiq": {
-        "name": "Pretrained MUSIQ (Multi-scale Transformer)",
-        "domain": "Decoded Pixels",
-        "requires_synthesis": True,
-        "params_m": 67.20,
-        "model_gmacs": 21.25,
-        "model_gflops": 42.50,
-        "synthesis_gflops": 285.00,
-        "total_gflops": 327.50,
-        "latency_bs1_ms": 217.50,
-        "latency_bs16_ms": 178.50,
-        "throughput_img_s": 5.6,
-        "flop_profiler": "Transformer Multi-Scale",
-    },
-    "pretrained_maniqa": {
-        "name": "Pretrained MANIQA (Swin-V2 Transformer)",
-        "domain": "Decoded Pixels",
-        "requires_synthesis": True,
-        "params_m": 29.50,
-        "model_gmacs": 42.00,
-        "model_gflops": 84.00,
-        "synthesis_gflops": 285.00,
-        "total_gflops": 369.00,
-        "latency_bs1_ms": 215.00,
-        "latency_bs16_ms": 182.00,
-        "throughput_img_s": 5.5,
-        "flop_profiler": "Swin-V2 Profiling",
-    },
-    "pretrained_niqe": {
-        "name": "Pretrained NIQE (Natural Scene Statistics)",
-        "domain": "Decoded Pixels",
-        "requires_synthesis": True,
-        "params_m": 0.01,
-        "model_gmacs": 6.00,
-        "model_gflops": 12.00,
-        "synthesis_gflops": 285.00,
-        "total_gflops": 297.00,
-        "latency_bs1_ms": 165.00,
-        "latency_bs16_ms": 165.00,
-        "throughput_img_s": 6.1,
-        "flop_profiler": "NSS Patch Extraction",
-    },
-    "pretrained_brisque": {
-        "name": "Pretrained BRISQUE (NSS Feature Model)",
-        "domain": "Decoded Pixels",
-        "requires_synthesis": True,
-        "params_m": 0.01,
-        "model_gmacs": 4.25,
-        "model_gflops": 8.50,
-        "synthesis_gflops": 285.00,
-        "total_gflops": 293.50,
-        "latency_bs1_ms": 145.00,
-        "latency_bs16_ms": 145.00,
-        "throughput_img_s": 6.9,
-        "flop_profiler": "AGGD Spatial Fit",
-    },
-}
-
-
 def measure_torch_flops_and_macs(
     forward_fn: Any,
-    default_gmacs: float,
-    default_gflops: float,
-) -> Tuple[float, float, str]:
-    """Measure empirical GMACs and GFLOPs for a single forward pass.
-    
-    Tries in order:
-    1. PyTorch native FlopCounterMode (built into PyTorch >= 2.1)
-    2. thop / fvcore (if installed)
-    3. Exact analytical layer formula as fallback
-    """
-    # 1. Native PyTorch FlopCounterMode (PyTorch >= 2.1)
+    default_gmacs: Optional[float] = None,
+    default_gflops: Optional[float] = None,
+) -> Tuple[Optional[float], Optional[float], str]:
+    """Measure empirical GMACs and GFLOPs for a forward pass using PyTorch FlopCounterMode."""
     try:
         from torch.utils.flop_counter import FlopCounterMode
         with FlopCounterMode(display=False) as fc:
@@ -355,12 +202,14 @@ def measure_torch_flops_and_macs(
         total_flops = fc.get_total_flops()
         if total_flops > 0:
             gflops = total_flops / 1e9
-            gmacs = gflops / 2.0  # 1 MAC = 2 FLOPs
+            gmacs = gflops / 2.0
             return round(gmacs, 2), round(gflops, 2), "PyTorch FlopCounterMode (live)"
     except Exception:
         pass
 
-    return round(default_gmacs, 2), round(default_gflops, 2), "Analytical layer formula"
+    if default_gflops is not None:
+        return round(default_gmacs or (default_gflops / 2.0), 2), round(default_gflops, 2), "Analytical layer formula"
+    return None, None, "unmeasured"
 
 
 def profile_torch_fn_latency(
@@ -390,8 +239,8 @@ def profile_torch_fn_latency(
 def run_live_gpu_benchmarking(
     h_orig: int = 768,
     w_orig: int = 1024,
-    warmup_runs: int = 15,
-    test_runs: int = 50,
+    warmup_runs: int = 20,
+    test_runs: int = 100,
     quick: bool = False,
 ) -> Dict[str, Dict[str, Any]]:
     """Run live hardware profiling on an available CUDA GPU."""
@@ -400,12 +249,20 @@ def run_live_gpu_benchmarking(
     from nrcomp.model.pixel_student import PixelStudent
 
     device = torch.device("cuda")
+    cuda_cap = torch.cuda.get_device_capability(device)
+
+    # Disable cuDNN on sm < 7.0 (Pascal sm_61) to use native ATen CUDA depthwise conv kernels
+    # This prevents the 38.65 ms cuDNN engine search / fallback slowdown.
+    if cuda_cap[0] < 7:
+        torch.backends.cudnn.enabled = False
+        print(f"[DEVICE] Hardware sm_{cuda_cap[0]}.{cuda_cap[1]} (Pascal) detected: cuDNN disabled for stability.")
+
     gpu_name = torch.cuda.get_device_name(device)
     vram_mb = torch.cuda.get_device_properties(device).total_memory / (1024 * 1024)
 
     if quick:
-        warmup_runs = max(3, warmup_runs // 3)
-        test_runs = max(10, test_runs // 3)
+        warmup_runs = max(5, warmup_runs // 3)
+        test_runs = max(15, test_runs // 3)
 
     print("=" * 80)
     print(f" nrcomp: Live Hardware Efficiency & Latency Benchmark")
@@ -415,11 +272,12 @@ def run_live_gpu_benchmarking(
     print(f" Profiling:   Warmup={warmup_runs}, Iterations={test_runs}")
     print("=" * 80)
 
-    data = {k: dict(v) for k, v in COMPLEXITY_REFERENCE_DATA.items()}
+    data: Dict[str, Dict[str, Any]] = {}
     h_lat, w_lat = h_orig // 16, w_orig // 16
 
     # 1. Latent Student Blind A
-    print("\n[1/8] Profiling Latent Student Blind A (y_hat)...", flush=True)
+    print("\n[1/5] Profiling Latent Student Blind A (y_hat)...", flush=True)
+    blind_a_calc = compute_latent_student_theoretical_complexity(config="A", conditioned=False)
     model_blind_a = LatentStudent(config="A", lambda_mode="blind").to(device).eval()
     params_m = sum(p.numel() for p in model_blind_a.parameters()) / 1e6
     y1 = torch.zeros((1, 320, h_lat, w_lat), device=device)
@@ -427,8 +285,8 @@ def run_live_gpu_benchmarking(
     with torch.no_grad():
         gmacs, gflops, flop_src = measure_torch_flops_and_macs(
             lambda: model_blind_a(y_hat=y1, valid_mask=m1),
-            default_gmacs=data["student_blind_a"]["model_gmacs"],
-            default_gflops=data["student_blind_a"]["model_gflops"],
+            default_gmacs=blind_a_calc["gmacs"],
+            default_gflops=blind_a_calc["gflops"],
         )
         lat_bs1 = profile_torch_fn_latency(lambda: model_blind_a(y_hat=y1, valid_mask=m1), warmup_runs, test_runs)
         y16 = torch.zeros((16, 320, h_lat, w_lat), device=device)
@@ -438,7 +296,9 @@ def run_live_gpu_benchmarking(
     th_s = 1000.0 / lat_bs16
     print(f"      FLOPs: {gflops:.2f} GFLOPs ({gmacs:.2f} GMACs) [{flop_src}]")
     print(f"      Params: {params_m:.2f}M | BS=1: {lat_bs1:.2f} ms | BS=16: {lat_bs16:.2f} ms/img | {th_s:.1f} img/s")
-    data["student_blind_a"].update({
+    data["student_blind_a"] = {
+        "name": "Student Blind A (y_hat)",
+        "domain": "Codec Latents",
         "params_m": params_m,
         "model_gmacs": gmacs,
         "model_gflops": gflops,
@@ -447,18 +307,19 @@ def run_live_gpu_benchmarking(
         "latency_bs1_ms": lat_bs1,
         "latency_bs16_ms": lat_bs16,
         "throughput_img_s": th_s,
-    })
+    }
 
     # 2. Latent Student Conditioned A
-    print("\n[2/8] Profiling Latent Student Conditioned A (y_hat + lambda)...", flush=True)
+    print("\n[2/5] Profiling Latent Student Conditioned A (y_hat + lambda)...", flush=True)
+    cond_a_calc = compute_latent_student_theoretical_complexity(config="A", conditioned=True)
     model_cond_a = LatentStudent(config="A", lambda_mode="conditioned").to(device).eval()
     params_m = sum(p.numel() for p in model_cond_a.parameters()) / 1e6
     l1 = torch.zeros((1,), dtype=torch.long, device=device)
     with torch.no_grad():
         gmacs, gflops, flop_src = measure_torch_flops_and_macs(
             lambda: model_cond_a(y_hat=y1, valid_mask=m1, lambda_idx=l1),
-            default_gmacs=data["student_conditioned_a"]["model_gmacs"],
-            default_gflops=data["student_conditioned_a"]["model_gflops"],
+            default_gmacs=cond_a_calc["gmacs"],
+            default_gflops=cond_a_calc["gflops"],
         )
         lat_bs1 = profile_torch_fn_latency(lambda: model_cond_a(y_hat=y1, valid_mask=m1, lambda_idx=l1), warmup_runs, test_runs)
         l16 = torch.zeros((16,), dtype=torch.long, device=device)
@@ -467,7 +328,9 @@ def run_live_gpu_benchmarking(
     th_s = 1000.0 / lat_bs16
     print(f"      FLOPs: {gflops:.2f} GFLOPs ({gmacs:.2f} GMACs) [{flop_src}]")
     print(f"      Params: {params_m:.2f}M | BS=1: {lat_bs1:.2f} ms | BS=16: {lat_bs16:.2f} ms/img | {th_s:.1f} img/s")
-    data["student_conditioned_a"].update({
+    data["student_conditioned_a"] = {
+        "name": "Student Conditioned A (y_hat + lambda)",
+        "domain": "Codec Latents",
         "params_m": params_m,
         "model_gmacs": gmacs,
         "model_gflops": gflops,
@@ -476,18 +339,19 @@ def run_live_gpu_benchmarking(
         "latency_bs1_ms": lat_bs1,
         "latency_bs16_ms": lat_bs16,
         "throughput_img_s": th_s,
-    })
+    }
 
     # 3. Latent Student Conditioned B
-    print("\n[3/8] Profiling Latent Student Conditioned B (y_hat + z_hat + lambda)...", flush=True)
+    print("\n[3/5] Profiling Latent Student Conditioned B (y_hat + z_hat + lambda)...", flush=True)
+    cond_b_calc = compute_latent_student_theoretical_complexity(config="B", conditioned=True)
     model_cond_b = LatentStudent(config="B", lambda_mode="conditioned").to(device).eval()
     params_m = sum(p.numel() for p in model_cond_b.parameters()) / 1e6
     z1 = torch.zeros((1, 192, h_lat // 4, w_lat // 4), device=device)
     with torch.no_grad():
         gmacs, gflops, flop_src = measure_torch_flops_and_macs(
             lambda: model_cond_b(y_hat=y1, z_hat=z1, valid_mask=m1, lambda_idx=l1),
-            default_gmacs=data["student_conditioned_b"]["model_gmacs"],
-            default_gflops=data["student_conditioned_b"]["model_gflops"],
+            default_gmacs=cond_b_calc["gmacs"],
+            default_gflops=cond_b_calc["gflops"],
         )
         lat_bs1 = profile_torch_fn_latency(lambda: model_cond_b(y_hat=y1, z_hat=z1, valid_mask=m1, lambda_idx=l1), warmup_runs, test_runs)
         z16 = torch.zeros((16, 192, h_lat // 4, w_lat // 4), device=device)
@@ -496,7 +360,9 @@ def run_live_gpu_benchmarking(
     th_s = 1000.0 / lat_bs16
     print(f"      FLOPs: {gflops:.2f} GFLOPs ({gmacs:.2f} GMACs) [{flop_src}]")
     print(f"      Params: {params_m:.2f}M | BS=1: {lat_bs1:.2f} ms | BS=16: {lat_bs16:.2f} ms/img | {th_s:.1f} img/s")
-    data["student_conditioned_b"].update({
+    data["student_conditioned_b"] = {
+        "name": "Student Conditioned B (y_hat + z_hat + lambda)",
+        "domain": "Codec Latents",
         "params_m": params_m,
         "model_gmacs": gmacs,
         "model_gflops": gflops,
@@ -505,101 +371,102 @@ def run_live_gpu_benchmarking(
         "latency_bs1_ms": lat_bs1,
         "latency_bs16_ms": lat_bs16,
         "throughput_img_s": th_s,
-    })
+    }
 
-    # 4. ELIC Synthesis Decoder (g_s)
-    print("\n[4/8] Profiling ELIC Synthesis Decoder (g_s)...", flush=True)
+    # 4. ELIC Synthesis Decoder (g_s via decode_from_latents)
+    print("\n[4/5] Profiling ELIC Synthesis Decoder (decode_from_latents)...", flush=True)
     elic_measured = False
-    elic_lat_bs1 = data["elic_synthesis_only"]["latency_bs1_ms"]
-    elic_lat_bs16 = data["elic_synthesis_only"]["latency_bs16_ms"]
     try:
         from nrcomp.codec.wrapper import ELICWrapper
+        from nrcomp.lambdas import load_lambdas_config
         weights_dir = PROJECT_ROOT / "weights" / "updated"
         if weights_dir.exists():
+            l_cfg = load_lambdas_config()
+            ckpt_0 = l_cfg[0]["checkpoint"]
             wrapper = ELICWrapper(weights_dir=weights_dir, device=str(device))
+            wrapper.load_model(0, ckpt_0)
             net = wrapper.get_model(0)
+
             if hasattr(net, "g_s"):
-                with torch.no_grad():
-                    elic_lat_bs1 = profile_torch_fn_latency(lambda: net.g_s(y1), warmup_runs=5, test_runs=20)
-                    elic_lat_bs16_tot = profile_torch_fn_latency(lambda: net.g_s(y16), warmup_runs=5, test_runs=15)
-                    elic_lat_bs16 = elic_lat_bs16_tot / 16.0
-                elic_measured = True
                 params_m = sum(p.numel() for p in net.g_s.parameters()) / 1e6
-                data["elic_synthesis_only"]["params_m"] = params_m
+                meta = {
+                    "original_size": (h_orig, w_orig),
+                    "padded_size": (h_orig, w_orig),
+                    "lambda_idx": 0,
+                }
+                with torch.no_grad():
+                    gmacs, gflops, flop_src = measure_torch_flops_and_macs(lambda: net.g_s(y1))
+                    # Measure full decode_from_latents
+                    elic_lat_bs1 = profile_torch_fn_latency(
+                        lambda: wrapper.decode_from_latents(y1, meta), warmup_runs=5, test_runs=20
+                    )
+                    # Measure batched g_s forward
+                    elic_lat_bs16_tot = profile_torch_fn_latency(
+                        lambda: net.g_s(y16), warmup_runs=5, test_runs=15
+                    )
+                    elic_lat_bs16 = elic_lat_bs16_tot / 16.0
+
+                th_elic = 1000.0 / elic_lat_bs1
+                print(f"      FLOPs: {gflops} GFLOPs ({gmacs} GMACs) [{flop_src}]")
+                print(f"      Params: {params_m:.2f}M | BS=1 decode_from_latents: {elic_lat_bs1:.2f} ms | {th_elic:.1f} img/s")
+                data["elic_synthesis_only"] = {
+                    "name": "ELIC Synthesis Decoder (decode_from_latents)",
+                    "domain": "Latents -> RGB Pixels",
+                    "params_m": params_m,
+                    "model_gmacs": gmacs,
+                    "model_gflops": gflops,
+                    "total_gflops": gflops,
+                    "flop_profiler": flop_src,
+                    "latency_bs1_ms": elic_lat_bs1,
+                    "latency_bs16_ms": elic_lat_bs16,
+                    "throughput_img_s": th_elic,
+                }
+                elic_measured = True
     except Exception as e:
-        print(f"      [INFO] Synthesis live profile fallback: {e}")
+        print(f"      [INFO] ELIC live decoding profiling skipped: {e}")
 
-    th_elic = 1000.0 / elic_lat_bs16
-    status = "measured" if elic_measured else "profiled reference"
-    print(f"      ({status}) BS=1: {elic_lat_bs1:.2f} ms | BS=16: {elic_lat_bs16:.2f} ms/img | {th_elic:.1f} img/s")
-    data["elic_synthesis_only"].update({
-        "latency_bs1_ms": elic_lat_bs1,
-        "latency_bs16_ms": elic_lat_bs16,
-        "throughput_img_s": th_elic,
-    })
-
-    # 5. Pixel Student (RGB CNN)
-    print("\n[5/8] Profiling Pixel Student (RGB CNN + lambda)...", flush=True)
-    pixel_model = PixelStudent(in_channels=3, lambda_mode="conditioned").to(device).eval()
-    pix_params_m = sum(p.numel() for p in pixel_model.parameters()) / 1e6
-    x1 = torch.zeros((1, 3, h_orig, w_orig), device=device)
-    with torch.no_grad():
-        pix_lat_bs1_fwd = profile_torch_fn_latency(lambda: pixel_model(x1, l1), warmup_runs=5, test_runs=25)
-        x16 = torch.zeros((16, 3, h_orig, w_orig), device=device)
-        pix_lat_bs16_fwd = profile_torch_fn_latency(lambda: pixel_model(x16, l16), warmup_runs=5, test_runs=15) / 16.0
-
-    tot_pix_bs1 = elic_lat_bs1 + pix_lat_bs1_fwd
-    tot_pix_bs16 = elic_lat_bs16 + pix_lat_bs16_fwd
-    th_pix = 1000.0 / tot_pix_bs16
-    print(f"      Forward: {pix_lat_bs1_fwd:.2f} ms | Total (g_s + CNN): {tot_pix_bs1:.2f} ms | {th_pix:.1f} img/s")
-    data["pixel_student_conditioned"].update({
-        "params_m": pix_params_m,
-        "latency_bs1_ms": tot_pix_bs1,
-        "latency_bs16_ms": tot_pix_bs16,
-        "throughput_img_s": th_pix,
-    })
-
-    # 6-8. Pretrained PyIQA models
-    pyiqa_models = [
-        ("pretrained_clipiqa", "clipiqa", "CLIPIQA (ViT-B/32)"),
-        ("pretrained_musiq", "musiq", "MUSIQ (Transformer)"),
-        ("pretrained_maniqa", "maniqa", "MANIQA (Swin-V2)"),
-        ("pretrained_niqe", "niqe", "NIQE (NSS)"),
-        ("pretrained_brisque", "brisque", "BRISQUE (NSS)"),
-    ]
-
-    has_pyiqa = False
+    # 5. Pixel Student (if available or checkpoint exists)
+    print("\n[5/5] Profiling Pixel Student (RGB CNN)...", flush=True)
     try:
-        import pyiqa
-        has_pyiqa = True
-    except ImportError:
-        print("\n[INFO] pyiqa not installed; keeping reference timings for pretrained NR models.")
+        pix_calc = compute_pixel_student_theoretical_complexity(conditioned=True)
+        pixel_model = PixelStudent(in_channels=3, lambda_mode="conditioned").to(device).eval()
+        pix_params_m = sum(p.numel() for p in pixel_model.parameters()) / 1e6
+        x1 = torch.zeros((1, 3, h_orig, w_orig), device=device)
+        with torch.no_grad():
+            gmacs, gflops, flop_src = measure_torch_flops_and_macs(
+                lambda: pixel_model(x1, l1),
+                default_gmacs=pix_calc["gmacs"],
+                default_gflops=pix_calc["gflops"],
+            )
+            pix_lat_bs1_fwd = profile_torch_fn_latency(lambda: pixel_model(x1, l1), warmup_runs=5, test_runs=25)
+            x16 = torch.zeros((16, 3, h_orig, w_orig), device=device)
+            pix_lat_bs16_fwd = profile_torch_fn_latency(lambda: pixel_model(x16, l16), warmup_runs=5, test_runs=15) / 16.0
 
-    for i, (key, m_name, disp_name) in enumerate(pyiqa_models, start=6):
-        step_str = f"[{i}/8]" if i <= 8 else f"[{i}]"
-        print(f"\n{step_str} Profiling Pretrained {disp_name}...", flush=True)
-        if not has_pyiqa:
-            print(f"      (reference) BS=1: {data[key]['latency_bs1_ms']:.2f} ms | {data[key]['throughput_img_s']:.1f} img/s")
-            continue
+        elic_decode_ms = data.get("elic_synthesis_only", {}).get("latency_bs1_ms", 0.0)
+        tot_pix_bs1 = elic_decode_ms + pix_lat_bs1_fwd
+        tot_pix_bs16 = (data.get("elic_synthesis_only", {}).get("latency_bs16_ms", 0.0)) + pix_lat_bs16_fwd
+        th_pix = 1000.0 / tot_pix_bs1 if tot_pix_bs1 > 0 else 0.0
+        tot_gflops = gflops + (data.get("elic_synthesis_only", {}).get("model_gflops") or 0.0)
 
-        try:
-            metric = pyiqa.create_metric(m_name, device=device)
-            # PyIQA models expect RGB input in [0, 1]
-            # Use dummy image
-            dummy_rgb = torch.rand(1, 3, h_orig, w_orig, device=device)
-            with torch.no_grad():
-                fwd_ms = profile_torch_fn_latency(lambda: metric(dummy_rgb), warmup_runs=3, test_runs=10)
-            tot_ms = elic_lat_bs1 + fwd_ms
-            th_pt = 1000.0 / tot_ms
-            data[key]["latency_bs1_ms"] = tot_ms
-            data[key]["latency_bs16_ms"] = tot_ms  # many pretrained transformers don't batch easily at full res
-            data[key]["throughput_img_s"] = th_pt
-            print(f"      Forward: {fwd_ms:.2f} ms | Total (g_s + model): {tot_ms:.2f} ms | {th_pt:.1f} img/s")
-        except Exception as e:
-            print(f"      [WARN] Live profile error for {m_name}: {e}. Retaining reference timings.")
+        print(f"      FLOPs: {gflops:.2f} GFLOPs ({gmacs:.2f} GMACs) [{flop_src}]")
+        print(f"      Params: {pix_params_m:.2f}M | Forward: {pix_lat_bs1_fwd:.2f} ms | Total Pipeline: {tot_pix_bs1:.2f} ms")
+        data["pixel_student_conditioned"] = {
+            "name": "Pixel Student (decode + CNN)",
+            "domain": "Decoded RGB Pixels",
+            "params_m": pix_params_m,
+            "model_gmacs": gmacs,
+            "model_gflops": gflops,
+            "total_gflops": tot_gflops,
+            "flop_profiler": flop_src,
+            "latency_bs1_ms": tot_pix_bs1,
+            "latency_bs16_ms": tot_pix_bs16,
+            "throughput_img_s": th_pix,
+        }
+    except Exception as e:
+        print(f"      [INFO] Pixel student profiling skipped: {e}")
 
     print("\n" + "=" * 80)
-    print(" Live GPU Benchmarking Complete!")
+    print(" Live Hardware Benchmarking Complete!")
     print("=" * 80)
     return data
 
@@ -609,11 +476,11 @@ def format_efficiency_report(
     data: Dict[str, Dict[str, Any]],
     baseline_ref_key: str = "student_conditioned_a",
 ) -> str:
-    """Format comprehensive computational efficiency report."""
+    """Format strictly measured computational efficiency report."""
     lines = [provenance_header, "# Model Computational Complexity & Efficiency Benchmark (`efficiency_benchmark.md`)", ""]
     lines.append(
-        "Quantitative computational performance comparison evaluating **Model Parameters**, "
-        "**FLOPs / MACs**, **Synthesis Decoder Overhead**, and **Real Hardware Latency / Throughput** "
+        "Empirical computational performance comparison evaluating **Model Parameters**, "
+        "**FLOPs / MACs**, **Synthesis Decoder Overhead**, and **Measured Hardware Latency / Throughput** "
         "on an **NVIDIA GeForce GTX 1080 Ti** (Pascal `sm_61`) at $1024 \\times 768$ resolution."
     )
     lines.append("")
@@ -621,30 +488,23 @@ def format_efficiency_report(
         "> [!IMPORTANT]\n"
         "> **Key Architectural Advantage:** Latent Student models predict compression degradation directly from\n"
         "> quantized codec latents $\\hat{y}$ (grid $64 \\times 48$), completely bypassing the expensive synthesis\n"
-        "> transform ($g_s$). In contrast, all pixel-domain models (CLIPIQA, MUSIQ, NIQE) require full reconstruction\n"
-        "> ($g_s: 285\\text{ GFLOPs}, 28.5\\text{ ms}$), creating a massive computational penalty before inference even begins."
+        "> transform ($g_s$). In contrast, pixel-domain models require full reconstruction prior to inference."
     )
     lines.append("")
-    lines.append("## 1. End-to-End Computational Complexity Comparison")
+    lines.append("## 1. Computational Complexity & Parameters")
     lines.append("")
     lines.append(
-        "| Method | Input Domain | Model GMACs | Model GFLOPs | Synthesis $g_s$ (GFLOPs) | **Total GFLOPs** | Parameters (M) | FLOP Profiler |"
+        "| Method | Input Domain | GMACs | GFLOPs | Parameters (M) | FLOP Profiler |"
     )
-    lines.append("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
-
-    ref_lat = data[baseline_ref_key]["latency_bs1_ms"]
+    lines.append("| :--- | :---: | :---: | :---: | :---: | :---: |")
 
     for k, d in data.items():
-        if k == "elic_synthesis_only":
-            continue
-        tot_gflops = f"{d['total_gflops']:.2f}"
-        syn_gflops = f"{d['synthesis_gflops']:.2f}" if d['requires_synthesis'] else "bypassed (0)"
-        mod_gflops = f"{d['model_gflops']:.2f}"
-        mod_gmacs = f"{d.get('model_gmacs', d['model_gflops'] / 2.0):.2f}"
-        params_str = f"{d['params_m']:.2f}M"
+        gmacs_str = f"{d['model_gmacs']:.2f}" if d.get('model_gmacs') is not None else "n/a"
+        gflops_str = f"{d['model_gflops']:.2f}" if d.get('model_gflops') is not None else "n/a"
+        params_str = f"{d['params_m']:.2f}M" if d.get('params_m') is not None else "n/a"
         profiler = d.get('flop_profiler', 'Analytical formula')
         lines.append(
-            f"| **{d['name']}** | {d['domain']} | {mod_gmacs} | {mod_gflops} | {syn_gflops} | **{tot_gflops}** | {params_str} | {profiler} |"
+            f"| **{d['name']}** | {d['domain']} | {gmacs_str} | **{gflops_str}** | {params_str} | {profiler} |"
         )
 
     lines.append("")
@@ -653,61 +513,68 @@ def format_efficiency_report(
     lines.append("## 2. Real Hardware Latency & Throughput Benchmark (GTX 1080 Ti)")
     lines.append("")
     lines.append(
-        "| Method | Synthesis Decode (ms) | Model Forward (ms) | **Total Latency BS=1** | **Latency BS=16** (ms/img) | **Throughput** (img/s) |"
+        "| Method | **Latency BS=1** | **Latency BS=16** (ms/img) | **Throughput** (img/s) | Speedup vs Cond-A |"
     )
-    lines.append("| :--- | :---: | :---: | :---: | :---: | :---: |")
+    lines.append("| :--- | :---: | :---: | :---: | :---: |")
 
-    elic_lat = data.get("elic_synthesis_only", {}).get("latency_bs1_ms", 28.5)
+    ref_lat = data.get(baseline_ref_key, {}).get("latency_bs1_ms", 1.0)
 
     for k, d in data.items():
-        syn_ms = f"{elic_lat:.2f} ms" if d['requires_synthesis'] else "0.00 ms (bypassed)"
-        if k == "elic_synthesis_only":
-            mod_ms = "n/a (decoder only)"
-            tot_bs1 = f"{d['latency_bs1_ms']:.2f} ms"
-            tot_bs16 = f"{d['latency_bs16_ms']:.2f} ms"
-        elif d['requires_synthesis']:
-            fwd = max(0.1, d['latency_bs1_ms'] - elic_lat)
-            mod_ms = f"{fwd:.2f} ms"
-            tot_bs1 = f"{d['latency_bs1_ms']:.2f} ms"
-            tot_bs16 = f"{d['latency_bs16_ms']:.2f} ms"
+        tot_bs1 = f"{d['latency_bs1_ms']:.2f} ms" if d.get('latency_bs1_ms') is not None else "n/a"
+        tot_bs16 = f"{d['latency_bs16_ms']:.2f} ms" if d.get('latency_bs16_ms') is not None else "n/a"
+        th_str = f"**{d['throughput_img_s']:.1f} img/s**" if d.get('throughput_img_s') is not None else "n/a"
+        if k == baseline_ref_key:
+            speedup = "**Baseline (1.0x)**"
+        elif d.get('latency_bs1_ms') and ref_lat:
+            ratio = d['latency_bs1_ms'] / ref_lat
+            speedup = f"{ratio:.1f}x slower" if ratio >= 1.0 else f"{1.0/ratio:.1f}x faster"
         else:
-            mod_ms = f"{d['latency_bs1_ms']:.2f} ms"
-            tot_bs1 = f"{d['latency_bs1_ms']:.2f} ms"
-            tot_bs16 = f"{d['latency_bs16_ms']:.2f} ms"
+            speedup = "n/a"
 
-        th_str = f"**{d['throughput_img_s']:.1f} img/s**" if not d['requires_synthesis'] else f"{d['throughput_img_s']:.1f} img/s"
         lines.append(
-            f"| **{d['name']}** | {syn_ms} | {mod_ms} | **{tot_bs1}** | {tot_bs16} | {th_str} |"
+            f"| **{d['name']}** | **{tot_bs1}** | {tot_bs16} | {th_str} | {speedup} |"
         )
 
     lines.append("")
     lines.append("---")
     lines.append("")
-    lines.append("## 3. Key Observations & Efficiency Metrics")
+    lines.append("## 3. Dynamic Observations Derived from Measured Values")
     lines.append("")
+
+    cond_a = data.get("student_conditioned_a", {})
+    elic = data.get("elic_synthesis_only", {})
+
+    lat_a = cond_a.get("latency_bs1_ms")
+    lat_elic = elic.get("latency_bs1_ms")
+    flops_a = cond_a.get("model_gflops")
+    flops_elic = elic.get("model_gflops")
+
+    if lat_a and lat_elic:
+        lines.append(
+            f"1. **Decoding Speedup:** Latent Student Conditioned A processes an image in **{lat_a:.2f} ms** "
+            f"({cond_a.get('throughput_img_s', 0):.1f} img/s), which is **{lat_elic / lat_a:.1f}× faster** "
+            f"than the ELIC synthesis transform alone (**{lat_elic:.2f} ms** from `decode_from_latents`), "
+            f"before any pixel-domain neural network evaluation even starts."
+        )
+    if flops_a and flops_elic:
+        lines.append(
+            f"2. **Computational Reduction:** Latent Student Conditioned A requires **{flops_a:.2f} GFLOPs**, "
+            f"representing a **{flops_elic / flops_a:.1f}× reduction** compared to the synthesis decoder (**{flops_elic:.2f} GFLOPs**)."
+        )
     lines.append(
-        "1. **FLOPs / GMACs Efficiency ($> 15\\times$ Reduction):**\n"
-        "   - The Latent Student requires only **10.15 GMACs (20.30 GFLOPs)** total to score a $1024 \\times 768$ image.\n"
-        "   - Pixel-domain models require **313 to 369 GFLOPs** because the codec synthesis transform alone demands 142.5 GMACs (285 GFLOPs).\n"
-        "   - *Note on Units:* 1 Multiply-Accumulate operation (MAC) = 2 Floating-Point Operations (FLOPs). Both metrics are tracked to eliminate ambiguity.\n"
-        "2. **Inference Throughput ($20\\times$ to $25\\times$ Faster):**\n"
-        "   - The Latent Student processes **~137–147 images/second** on a GTX 1080 Ti.\n"
-        "   - Pretrained NR models process only **~5.5–6.9 images/second** (end-to-end).\n"
-        "3. **Parameter Footprint ($15\\times$ to $35\\times$ Smaller):**\n"
-        "   - `student_conditioned_a` has only **4.30M parameters** (~17 MB).\n"
-        "   - CLIPIQA requires **149.6M parameters** (~600 MB), and MUSIQ requires **67.2M parameters**.\n"
+        f"3. **Parameter Footprint:** Latent Student Conditioned A has **{cond_a.get('params_m', 4.3):.2f}M parameters**."
     )
     lines.append("")
     return "\n".join(lines)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Benchmark FLOPs, parameters, and latency across methods.")
+    parser = argparse.ArgumentParser(description="Benchmark FLOPs, parameters, and latency across measured methods.")
     parser.add_argument("--output", type=str, default="reports/efficiency_benchmark.md", help="Output report path.")
     parser.add_argument("--json-output", type=str, default="reports/efficiency_benchmark.json", help="JSON output path.")
     parser.add_argument("--offline", action="store_true", help="Force offline calculation without live GPU execution.")
-    parser.add_argument("--warmup", type=int, default=15, help="Number of warmup iterations per model.")
-    parser.add_argument("--iters", type=int, default=50, help="Number of timed benchmark iterations per model.")
+    parser.add_argument("--warmup", type=int, default=20, help="Number of warmup iterations per model.")
+    parser.add_argument("--iters", type=int, default=100, help="Number of timed benchmark iterations per model.")
     parser.add_argument("--quick", action="store_true", help="Quick mode (fewer iterations for fast feedback).")
     args = parser.parse_args()
 
@@ -715,34 +582,6 @@ def main():
     json_p = PROJECT_ROOT / args.json_output if not Path(args.json_output).is_absolute() else Path(args.json_output)
     out_p.parent.mkdir(parents=True, exist_ok=True)
 
-    # 1. Compute exact theoretical complexities
-    blind_a = compute_latent_student_theoretical_complexity(config="A", conditioned=False)
-    cond_a = compute_latent_student_theoretical_complexity(config="A", conditioned=True)
-    cond_b = compute_latent_student_theoretical_complexity(config="B", conditioned=True)
-    pix_cond = compute_pixel_student_theoretical_complexity(conditioned=True)
-
-    data = {k: dict(v) for k, v in COMPLEXITY_REFERENCE_DATA.items()}
-    data["student_blind_a"]["params_m"] = blind_a["params_millions"]
-    data["student_blind_a"]["model_gmacs"] = blind_a["gmacs"]
-    data["student_blind_a"]["model_gflops"] = blind_a["gflops"]
-    data["student_blind_a"]["total_gflops"] = blind_a["gflops"]
-
-    data["student_conditioned_a"]["params_m"] = cond_a["params_millions"]
-    data["student_conditioned_a"]["model_gmacs"] = cond_a["gmacs"]
-    data["student_conditioned_a"]["model_gflops"] = cond_a["gflops"]
-    data["student_conditioned_a"]["total_gflops"] = cond_a["gflops"]
-
-    data["student_conditioned_b"]["params_m"] = cond_b["params_millions"]
-    data["student_conditioned_b"]["model_gmacs"] = cond_b["gmacs"]
-    data["student_conditioned_b"]["model_gflops"] = cond_b["gflops"]
-    data["student_conditioned_b"]["total_gflops"] = cond_b["gflops"]
-
-    data["pixel_student_conditioned"]["params_m"] = pix_cond["params_millions"]
-    data["pixel_student_conditioned"]["model_gmacs"] = pix_cond["gmacs"]
-    data["pixel_student_conditioned"]["model_gflops"] = pix_cond["gflops"]
-    data["pixel_student_conditioned"]["total_gflops"] = pix_cond["gflops"] + 285.0
-
-    # 2. Check if live GPU profiling is possible
     has_cuda = False
     if not args.offline:
         try:
@@ -759,7 +598,62 @@ def main():
         )
     else:
         print("[INFO] CUDA device not available or offline mode requested.")
-        print("[INFO] Using analytical FLOPs and verified reference hardware latency profiling.")
+        print("[INFO] Computing exact theoretical layer complexities.")
+        blind_a = compute_latent_student_theoretical_complexity(config="A", conditioned=False)
+        cond_a = compute_latent_student_theoretical_complexity(config="A", conditioned=True)
+        cond_b = compute_latent_student_theoretical_complexity(config="B", conditioned=True)
+        pix_cond = compute_pixel_student_theoretical_complexity(conditioned=True)
+
+        data = {
+            "student_blind_a": {
+                "name": "Student Blind A (y_hat)",
+                "domain": "Codec Latents",
+                "params_m": blind_a["params_millions"],
+                "model_gmacs": blind_a["gmacs"],
+                "model_gflops": blind_a["gflops"],
+                "total_gflops": blind_a["gflops"],
+                "flop_profiler": "Analytical formula",
+                "latency_bs1_ms": None,
+                "latency_bs16_ms": None,
+                "throughput_img_s": None,
+            },
+            "student_conditioned_a": {
+                "name": "Student Conditioned A (y_hat + lambda)",
+                "domain": "Codec Latents",
+                "params_m": cond_a["params_millions"],
+                "model_gmacs": cond_a["gmacs"],
+                "model_gflops": cond_a["gflops"],
+                "total_gflops": cond_a["gflops"],
+                "flop_profiler": "Analytical formula",
+                "latency_bs1_ms": None,
+                "latency_bs16_ms": None,
+                "throughput_img_s": None,
+            },
+            "student_conditioned_b": {
+                "name": "Student Conditioned B (y_hat + z_hat + lambda)",
+                "domain": "Codec Latents",
+                "params_m": cond_b["params_millions"],
+                "model_gmacs": cond_b["gmacs"],
+                "model_gflops": cond_b["gflops"],
+                "total_gflops": cond_b["gflops"],
+                "flop_profiler": "Analytical formula",
+                "latency_bs1_ms": None,
+                "latency_bs16_ms": None,
+                "throughput_img_s": None,
+            },
+            "pixel_student_conditioned": {
+                "name": "Pixel Student (RGB CNN)",
+                "domain": "Decoded RGB Pixels",
+                "params_m": pix_cond["params_millions"],
+                "model_gmacs": pix_cond["gmacs"],
+                "model_gflops": pix_cond["gflops"],
+                "total_gflops": pix_cond["gflops"],
+                "flop_profiler": "Analytical formula",
+                "latency_bs1_ms": None,
+                "latency_bs16_ms": None,
+                "throughput_img_s": None,
+            },
+        }
 
     prov = collect_provenance(input_artifacts=[])
     prov_header = format_provenance_header(prov, "Efficiency Benchmark Provenance")
@@ -769,17 +663,16 @@ def main():
     with open(json_p, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 
-    # 3. If reports/runs exists, also update latency_benchmark run artifact for eval_pixel_refs
+    # Update latency_benchmark run artifact if live values were measured
     runs_dir = PROJECT_ROOT / "reports" / "runs"
-    if runs_dir.exists():
+    if runs_dir.exists() and "student_conditioned_a" in data and data["student_conditioned_a"].get("latency_bs1_ms"):
         lat_run_dir = runs_dir / "latency_benchmark"
         lat_run_dir.mkdir(parents=True, exist_ok=True)
         lat_artifact = lat_run_dir / "eval_metrics.json"
+
         cond_lat = data["student_conditioned_a"]["latency_bs1_ms"]
-        elic_lat = data["elic_synthesis_only"]["latency_bs1_ms"]
-        pix_cnn_lat = max(0.1, data["pixel_student_conditioned"]["latency_bs1_ms"] - elic_lat)
-        tot_pix = elic_lat + pix_cnn_lat
-        speedup = tot_pix / cond_lat if cond_lat > 0 else 1.0
+        elic_lat = data.get("elic_synthesis_only", {}).get("latency_bs1_ms")
+        pix_lat = data.get("pixel_student_conditioned", {}).get("latency_bs1_ms")
 
         latency_run_doc = {
             "model": "latency_benchmark",
@@ -787,9 +680,9 @@ def main():
             "latency_stats": {
                 "latent_student_ms": cond_lat,
                 "synthesis_decode_ms": elic_lat,
-                "pixel_student_ms": pix_cnn_lat,
-                "total_pixel_pipeline_ms": tot_pix,
-                "speedup_ratio": speedup,
+                "pixel_student_ms": (pix_lat - elic_lat) if (pix_lat and elic_lat) else None,
+                "total_pixel_pipeline_ms": pix_lat if pix_lat else None,
+                "speedup_ratio": (pix_lat / cond_lat) if (pix_lat and cond_lat) else ((elic_lat / cond_lat) if (elic_lat and cond_lat) else None),
             },
             "detailed_benchmark": data,
         }

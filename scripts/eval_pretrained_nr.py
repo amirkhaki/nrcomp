@@ -439,10 +439,40 @@ def save_run_artifacts(
             pass
 
 
+def _compute_seed_stats_for_split(
+    seed_docs: List[Dict[str, Any]],
+    split_key: str,
+) -> Dict[str, Tuple[Optional[float], Optional[float]]]:
+    """Compute mean and std across seed documents for each metric on a split."""
+    metrics = [
+        "within_lambda_srocc",
+        "srocc",
+        "plcc",
+        "within_lambda_partial_spearman_bpp",
+        "ds_auc",
+    ]
+    res: Dict[str, Tuple[Optional[float], Optional[float]]] = {}
+    for m in metrics:
+        vals = []
+        for doc in seed_docs:
+            sp = (doc.get("splits") or {}).get(split_key)
+            if sp and sp.get(m) is not None:
+                vals.append(float(sp[m]))
+        if vals:
+            mean = sum(vals) / len(vals)
+            var = sum((x - mean) ** 2 for x in vals) / max(len(vals) - 1, 1)
+            std = math.sqrt(var) if len(vals) > 1 else 0.0
+            res[m] = (mean, std)
+        else:
+            res[m] = (None, None)
+    return res
+
+
 def format_report_markdown(
     provenance_header: str,
     results: Dict[str, Dict[str, Any]],
     latent_baselines: Dict[str, Dict[str, Any]],
+    latent_seed_docs: Optional[Dict[str, List[Dict[str, Any]]]] = None,
 ) -> str:
     """Render comprehensive markdown report comparing NR models with Latent Students."""
     lines = [provenance_header, "# Pretrained No-Reference (NR-IQA) Evaluation Report (`eval_pretrained_nr.md`)", ""]
@@ -467,6 +497,13 @@ def format_report_markdown(
             return "n/a"
         return f"{float(v):.{nd}f}"
 
+    def _fmt_stat(m, s):
+        if m is None:
+            return "n/a"
+        if s is None or s == 0.0:
+            return f"{m:.4f}"
+        return f"{m:.4f} ± {s:.4f}"
+
     for split_key, title in splits_to_show:
         lines.append(f"## {title}")
         lines.append("")
@@ -474,19 +511,50 @@ def format_report_markdown(
         lines.append("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
 
         # 1. Latent student reference rows
-        for lat_name, lat_doc in latent_baselines.items():
-            sp = (lat_doc.get("splits") or {}).get(split_key)
-            if sp:
-                ci = sp.get("within_lambda_srocc_ci") or (None, None)
-                ci_str = f" [{_fmt(ci[0])}, {_fmt(ci[1])}]" if ci[0] is not None else ""
-                disp = runs.DISPLAY_NAMES.get(lat_name, lat_name)
+        seen_lat_keys = set()
+        cand_keys = ["conditioned_a", "blind_a", "conditioned_b"]
+        all_keys = cand_keys + [k for k in latent_baselines.keys() if k not in cand_keys and not k.startswith("pretrained")]
+
+        for lat_name in all_keys:
+            base_key = lat_name.replace("student_", "").replace("_ensemble", "")
+            if base_key in seen_lat_keys:
+                continue
+            seen_lat_keys.add(base_key)
+
+            lat_doc = latent_baselines.get(lat_name) or latent_baselines.get(base_key) or latent_baselines.get(f"student_{base_key}")
+            s_docs = (latent_seed_docs or {}).get(base_key, []) or (latent_seed_docs or {}).get(f"student_{base_key}", []) or (latent_seed_docs or {}).get(lat_name, [])
+
+            disp_base = runs.DISPLAY_NAMES.get(base_key, runs.DISPLAY_NAMES.get(lat_name, lat_name))
+            disp_base = disp_base.replace(" (y_hat + lambda)", "").replace(" (y_hat)", "").replace(" (y_hat + z_hat + lambda)", "")
+            if not disp_base.startswith("Student"):
+                disp_base = f"Student {disp_base.capitalize()}"
+
+            # Headline row: Seed mean ± std across single models
+            if s_docs:
+                stats = _compute_seed_stats_for_split(s_docs, split_key)
                 lines.append(
-                    f"| **{disp}** | Codec Latents | native | "
-                    f"**{_fmt(sp.get('within_lambda_srocc'))}**{ci_str} | "
-                    f"{_fmt(sp.get('srocc'))} | {_fmt(sp.get('plcc'))} | "
-                    f"{_fmt(sp.get('within_lambda_partial_spearman_bpp'))} | "
-                    f"{_fmt(sp.get('ds_auc'))} |"
+                    f"| **{disp_base} (seed mean ± std)** | Codec Latents | native | "
+                    f"**{_fmt_stat(*stats['within_lambda_srocc'])}** | "
+                    f"{_fmt_stat(*stats['srocc'])} | {_fmt_stat(*stats['plcc'])} | "
+                    f"{_fmt_stat(*stats['within_lambda_partial_spearman_bpp'])} | "
+                    f"{_fmt_stat(*stats['ds_auc'])} |"
                 )
+
+            # Secondary row: 3-seed ensemble
+            if lat_doc:
+                sp = (lat_doc.get("splits") or {}).get(split_key)
+                if sp:
+                    ci = sp.get("within_lambda_srocc_ci") or (None, None)
+                    ci_str = f" [{_fmt(ci[0])}, {_fmt(ci[1])}]" if ci[0] is not None else ""
+                    prefix = "↳ " if s_docs else ""
+                    ens_tag = " (3-seed ensemble)" if s_docs else ""
+                    lines.append(
+                        f"| {prefix}**{disp_base}{ens_tag}** | Codec Latents | native | "
+                        f"{_fmt(sp.get('within_lambda_srocc'))}{ci_str} | "
+                        f"{_fmt(sp.get('srocc'))} | {_fmt(sp.get('plcc'))} | "
+                        f"{_fmt(sp.get('within_lambda_partial_spearman_bpp'))} | "
+                        f"{_fmt(sp.get('ds_auc'))} |"
+                    )
 
         # 2. Pretrained NR model rows
         for m_name, doc in results.items():
@@ -873,6 +941,7 @@ def main():
 
     # Load Latent Student reference models from disk if present
     latent_baselines = {}
+    latent_seed_docs = {}
     for lat_name in ["conditioned_a", "blind_a", "conditioned_b"]:
         ens_p = runs_dir / runs.ensemble_name(lat_name) / runs.EVAL_METRICS_FILE
         if ens_p.exists():
@@ -884,6 +953,15 @@ def main():
                 with open(cand_p, "r", encoding="utf-8") as f:
                     latent_baselines[lat_name] = json.load(f)
 
+        s_docs = []
+        for s in runs.DEFAULT_SEEDS:
+            s_p = runs_dir / runs.run_name(lat_name, s) / runs.EVAL_METRICS_FILE
+            if s_p.exists():
+                with open(s_p, "r", encoding="utf-8") as f:
+                    s_docs.append(json.load(f))
+        if s_docs:
+            latent_seed_docs[lat_name] = s_docs
+
     # Collect provenance and write final report
     input_artifacts = [manifest_p, LAMBDAS_YAML]
     for m in results:
@@ -893,7 +971,7 @@ def main():
 
     prov = collect_provenance(manifest_path=manifest_p, input_artifacts=input_artifacts)
     prov_header = format_provenance_header(prov, "Pretrained NR Evaluation Provenance")
-    report_md = format_report_markdown(prov_header, results, latent_baselines)
+    report_md = format_report_markdown(prov_header, results, latent_baselines, latent_seed_docs=latent_seed_docs)
 
     output_p.write_text(report_md, encoding="utf-8")
     print(f"\n================================================================================")
