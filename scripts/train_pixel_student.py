@@ -218,7 +218,7 @@ def evaluate_pixel_model(
     model: Any,
     loader: Any,
     device: Any,
-) -> Tuple[List[Dict[str, Any]], float]:
+) -> List[Dict[str, Any]]:
     """Run inference over a loader and return raw predictions and targets."""
     model.eval()
     records = []
@@ -367,7 +367,7 @@ def main():
 
                 optimizer.zero_grad()
                 preds = model(x, lambda_idx=l)
-                loss, _, _ = criterion(preds, t)
+                loss, _ = criterion(preds, t, lambda_indices=l)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
