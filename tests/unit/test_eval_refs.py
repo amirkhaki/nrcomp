@@ -43,6 +43,20 @@ class TestEvalRefs(unittest.TestCase):
         self.assertIn("0.8123", md)
         self.assertIn("0.7950", md)
 
+    def test_format_pixel_refs_report_with_runs_dir(self):
+        prov = {"git_sha": "abc1234", "date": "2026-11-18"}
+        lat = {"srocc": 0.9412, "within_lambda_srocc": 0.8123}
+        runs_dir_dict = {
+            "conditioned_b_seed42": {"splits": {"koniq_test": {"within_lambda_srocc": 0.770}, "livec_test": {"within_lambda_srocc": 0.750}}},
+            "conditioned_b_seed43": {"splits": {"koniq_test": {"within_lambda_srocc": 0.772}, "livec_test": {"within_lambda_srocc": 0.752}}},
+            "conditioned_b_seed44": {"splits": {"koniq_test": {"within_lambda_srocc": 0.768}, "livec_test": {"within_lambda_srocc": 0.748}}},
+        }
+        md = format_pixel_refs_report(prov, lat, None, {"clipiqa": None}, None, runs_dir=runs_dir_dict)
+        self.assertIn("Latent student (Conditioned B, seed mean ± std)", md)
+        self.assertIn("0.7700 ± 0.0020", md)
+        self.assertIn("0.7500 ± 0.0020", md)
+        self.assertIn("↳ Latent student (Conditioned B, ensemble)", md)
+
     def test_format_ablations_report(self):
         prov = {"git_sha": "abc1234", "date": "2026-11-18"}
         runs = {

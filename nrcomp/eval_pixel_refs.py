@@ -82,6 +82,14 @@ def _seed_txt(mean: Optional[float], std: Optional[float], n: int) -> str:
     return f"{_fmt(mean)} ± {_fmt(std)} (n={n})"
 
 
+def _fmt_stat(mean: Optional[float], std: Optional[float], n: Optional[int] = None) -> str:
+    if mean is None:
+        return NOT_RUN
+    if std is None or std == 0.0:
+        return _fmt(mean)
+    return f"{_fmt(mean)} ± {_fmt(std)}"
+
+
 def _split_metric(doc: Optional[Dict[str, Any]], split: str, metric: str) -> Optional[float]:
     if not doc or not isinstance(doc, dict):
         return None
