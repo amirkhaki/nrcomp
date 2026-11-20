@@ -69,7 +69,7 @@ class TestEvalPretrainedNR(unittest.TestCase):
             }
             for i in range(15)
         ]
-        res = evaluate_split_records(records, fitter=None, n_bootstrap=0)
+        res = evaluate_split_records(records, fitter=None, n_bootstrap=50)
         self.assertEqual(res["n_samples"], 15)
         self.assertEqual(res["n_images"], 15)
         self.assertIn("within_lambda_srocc", res)
@@ -77,6 +77,7 @@ class TestEvalPretrainedNR(unittest.TestCase):
         self.assertIn("pwrc", res)
         self.assertIn("within_lambda_partial_spearman_bpp", res)
         self.assertIn("per_lambda_partial_spearman_bpp", res)
+        self.assertIsNotNone(res["within_lambda_srocc_ci"][0])
 
     def test_format_report_markdown(self):
         prov = "> [!NOTE]\n> Provenance test header\n"

@@ -213,14 +213,13 @@ def evaluate_split_records(
 
     if n_bootstrap > 0 and len(set(image_ids)) >= 10:
         cis = compute_clustered_bootstrap_cis(
-            preds=preds,
-            targets=targets,
-            image_ids=image_ids,
-            lambdas=lambdas,
+            records=records,
+            raw_pred_key="aligned_score",
+            mapped_pred_key="mapped_pred",
+            target_key="target",
             n_resamples=n_bootstrap,
             seed=seed,
-            mapped_preds=mapped,
-            compute_ds_auc=True,
+            compute_ds_auc_ci=True,
         )
         ci_w_srocc = cis.get("within_lambda_srocc", (None, None))
         ci_srocc = cis.get("srocc", (None, None))
