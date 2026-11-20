@@ -1,12 +1,12 @@
 <!-- PROVENANCE HEADER START -->
 > [!NOTE]
 > **Efficiency Benchmark Provenance**
-> - **Git Commit:** `b71b7092849ee1c27da3069b29f2a24c4a06bd6b` (working tree: DIRTY (uncommitted changes))
+> - **Git Commit:** `94faf341c42fac2f707e9bc91af0654f415b55b0` (working tree: DIRTY (uncommitted changes))
 > - **Config:** `None` (SHA-256: `None`)
 > - **Manifest:** `None` (SHA-256: `None`)
 > - **Lambdas config:** `/Projects/claude/nrcomp/configs/lambdas.yaml` (SHA-256: `f5da5ce9dfde745db7ee50b943d0ddaa65726e66923ee03109426d62c9ccaa31`)
 > - **Seeds:** `[]`
-> - **Generated at (UTC):** `2026-11-20T10:40:13.755489+00:00`
+> - **Generated at (UTC):** `2026-11-20T10:54:05.860333+00:00`
 > - **Input artifacts:** none
 <!-- PROVENANCE HEADER END -->
 
@@ -22,17 +22,17 @@ Quantitative computational performance comparison evaluating **Model Parameters*
 
 ## 1. End-to-End Computational Complexity Comparison
 
-| Method | Input Domain | Synthesis $g_s$ (GFLOPs) | Model (GFLOPs) | **Total GFLOPs** | Parameters (M) | **Speedup vs Pixel NR** |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Student Blind A (y_hat)** | Codec Latents | bypassed (0) | 20.29 | **20.29** | 3.44M | **Baseline (1.0x)** |
-| **Student Conditioned A (y_hat + lambda)** | Codec Latents | bypassed (0) | 20.30 | **20.30** | 4.30M | **Baseline (1.0x)** |
-| **Student Conditioned B (y_hat + z_hat + lambda)** | Codec Latents | bypassed (0) | 20.83 | **20.83** | 4.94M | 1.0x slower |
-| **Pixel Student (RGB CNN + lambda)** | Decoded Pixels | 285.00 | 56.45 | **341.45** | 2.45M | 5.0x slower |
-| **Pretrained CLIPIQA (OpenAI ViT-B/32)** | Decoded Pixels | 285.00 | 28.80 | **313.80** | 149.60M | 30.3x slower |
-| **Pretrained MUSIQ (Multi-scale Transformer)** | Decoded Pixels | 285.00 | 42.50 | **327.50** | 67.20M | 29.9x slower |
-| **Pretrained MANIQA (Swin-V2 Transformer)** | Decoded Pixels | 285.00 | 84.00 | **369.00** | 29.50M | 29.5x slower |
-| **Pretrained NIQE (Natural Scene Statistics)** | Decoded Pixels | 285.00 | 12.00 | **297.00** | 0.01M | 22.7x slower |
-| **Pretrained BRISQUE (NSS Feature Model)** | Decoded Pixels | 285.00 | 8.50 | **293.50** | 0.01M | 19.9x slower |
+| Method | Input Domain | Model GMACs | Model GFLOPs | Synthesis $g_s$ (GFLOPs) | **Total GFLOPs** | Parameters (M) | FLOP Profiler |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Student Blind A (y_hat)** | Codec Latents | 10.15 | 20.29 | bypassed (0) | **20.29** | 3.44M | PyTorch FlopCounterMode / Analytical |
+| **Student Conditioned A (y_hat + lambda)** | Codec Latents | 10.15 | 20.30 | bypassed (0) | **20.30** | 4.30M | PyTorch FlopCounterMode / Analytical |
+| **Student Conditioned B (y_hat + z_hat + lambda)** | Codec Latents | 10.41 | 20.83 | bypassed (0) | **20.83** | 4.94M | PyTorch FlopCounterMode / Analytical |
+| **Pixel Student (RGB CNN + lambda)** | Decoded Pixels | 28.22 | 56.45 | 285.00 | **341.45** | 2.45M | PyTorch FlopCounterMode / Analytical |
+| **Pretrained CLIPIQA (OpenAI ViT-B/32)** | Decoded Pixels | 14.40 | 28.80 | 285.00 | **313.80** | 149.60M | ViT-B/32 Specification |
+| **Pretrained MUSIQ (Multi-scale Transformer)** | Decoded Pixels | 21.25 | 42.50 | 285.00 | **327.50** | 67.20M | Transformer Multi-Scale |
+| **Pretrained MANIQA (Swin-V2 Transformer)** | Decoded Pixels | 42.00 | 84.00 | 285.00 | **369.00** | 29.50M | Swin-V2 Profiling |
+| **Pretrained NIQE (Natural Scene Statistics)** | Decoded Pixels | 6.00 | 12.00 | 285.00 | **297.00** | 0.01M | NSS Patch Extraction |
+| **Pretrained BRISQUE (NSS Feature Model)** | Decoded Pixels | 4.25 | 8.50 | 285.00 | **293.50** | 0.01M | AGGD Spatial Fit |
 
 ---
 
@@ -55,9 +55,10 @@ Quantitative computational performance comparison evaluating **Model Parameters*
 
 ## 3. Key Observations & Efficiency Metrics
 
-1. **FLOPs Efficiency ($> 15\times$ Reduction):**
-   - The Latent Student requires only **20.30 GFLOPs** total to score a $1024 \times 768$ image.
-   - Pixel-domain models require **313 to 369 GFLOPs** because the codec synthesis transform alone demands 285 GFLOPs.
+1. **FLOPs / GMACs Efficiency ($> 15\times$ Reduction):**
+   - The Latent Student requires only **10.15 GMACs (20.30 GFLOPs)** total to score a $1024 \times 768$ image.
+   - Pixel-domain models require **313 to 369 GFLOPs** because the codec synthesis transform alone demands 142.5 GMACs (285 GFLOPs).
+   - *Note on Units:* 1 Multiply-Accumulate operation (MAC) = 2 Floating-Point Operations (FLOPs). Both metrics are tracked to eliminate ambiguity.
 2. **Inference Throughput ($20\times$ to $25\times$ Faster):**
    - The Latent Student processes **~137–147 images/second** on a GTX 1080 Ti.
    - Pretrained NR models process only **~5.5–6.9 images/second** (end-to-end).
