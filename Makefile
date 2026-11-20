@@ -217,6 +217,17 @@ eval-pretrained-nr:
 		python3 scripts/eval_pretrained_nr.py; \
 	fi
 
+benchmark-efficiency:
+	@if [ "$$CONDA_DEFAULT_ENV" = "nrcomp-main" ]; then \
+		python scripts/benchmark_efficiency.py; \
+	elif command -v conda >/dev/null && conda info --envs | grep -q "nrcomp-main"; then \
+		conda run --no-capture-output -n nrcomp-main python scripts/benchmark_efficiency.py; \
+	elif [ -d ".venv-main" ]; then \
+		.venv-main/bin/python scripts/benchmark_efficiency.py; \
+	else \
+		python3 scripts/benchmark_efficiency.py; \
+	fi
+
 codec-sanity:
 	@if command -v conda >/dev/null && conda info --envs | grep -q "nrcomp-codec"; then \
 		conda run --no-capture-output -n nrcomp-codec python scripts/codec_sanity.py --config configs/codec_sanity.yaml; \
