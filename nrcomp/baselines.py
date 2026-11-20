@@ -262,3 +262,12 @@ class LatentStatsBaseline:
             import numpy as np
             return self.model.predict(np.array(features)).tolist()
         return [self._mean_y] * len(features)
+
+
+def __getattr__(name: str) -> Any:
+    """Lazy re-export of evaluation metrics to avoid circular imports."""
+    if name in ("compute_pwrc_within_lambda", "compute_within_lambda_partial_spearman"):
+        from nrcomp import eval_metrics
+        return getattr(eval_metrics, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+

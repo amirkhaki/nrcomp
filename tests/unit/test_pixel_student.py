@@ -34,6 +34,20 @@ class TestPixelStudent(unittest.TestCase):
         self.assertEqual(model.lambda_mode, "blind")
         self.assertEqual(model.base_channels, 32)
 
+    def test_baselines_reexport(self):
+        from nrcomp.baselines import (
+            compute_pwrc_within_lambda,
+            compute_within_lambda_partial_spearman,
+        )
+        self.assertTrue(callable(compute_pwrc_within_lambda))
+        self.assertTrue(callable(compute_within_lambda_partial_spearman))
+
+    def test_train_pixel_student_importable(self):
+        import scripts.train_pixel_student as tps
+        self.assertTrue(hasattr(tps, "PixelReconDataset"))
+        self.assertTrue(hasattr(tps, "main"))
+
+
 
 if __name__ == "__main__":
     unittest.main()

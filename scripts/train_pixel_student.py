@@ -27,8 +27,6 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from nrcomp import runs
 from nrcomp.baselines import (
-    compute_pwrc_within_lambda,
-    compute_within_lambda_partial_spearman,
     compute_within_lambda_srocc,
     pearson_r,
     spearman_rho,
@@ -36,10 +34,12 @@ from nrcomp.baselines import (
 from nrcomp.config import load_config
 from nrcomp.data.manifest import ParquetManifest
 from nrcomp.data.store import LatentStore
-from nrcomp.evaluate import (
+from nrcomp.eval_metrics import (
     Logistic4PFitter,
     compute_clustered_bootstrap_cis,
+    compute_pwrc_within_lambda,
     compute_rmse,
+    compute_within_lambda_partial_spearman,
 )
 from nrcomp.labels.registry import get_metric_spec, prepare_target_value
 from nrcomp.model.loss import CompositeLoss
@@ -109,18 +109,31 @@ class PixelReconDataset(Dataset):
 
     def _load_or_decode_image(self, r: Dict[str, Any]) -> Any:
         img_id = str(r["image_id"])
+        stem = Path(img_id).stem
         l_idx = int(r["lambda_idx"])
         ds = str(r.get("dataset", "koniq"))
 
-        candidates = [
-            self.recon_dir / f"{img_id}_lambda{l_idx}.png",
-            self.recon_dir / ds / f"{img_id}_lambda{l_idx}.png",
-            self.project_root / "data" / "recons" / f"{img_id}_lambda{l_idx}.png",
-            self.project_root / "data" / "recon" / f"{img_id}_lambda{l_idx}.png",
-        ]
+        candidates = []
         if r.get("recon_path"):
             rp = Path(r["recon_path"])
-            candidates.insert(0, rp if rp.is_absolute() else self.project_root / rp)
+            if rp.is_absolute():
+                candidates.append(rp)
+            else:
+                candidates.append(self.project_root / rp)
+                raw_str = str(rp)
+                if "data/recon/" in raw_str:
+                    candidates.append(self.project_root / raw_str.replace("data/recon/", "data/recons/"))
+                elif "data/recons/" in raw_str:
+                    candidates.append(self.project_root / raw_str.replace("data/recons/", "data/recon/"))
+
+        # Standard layout candidates
+        for base in [self.recon_dir, self.project_root / "data" / "recons", self.project_root / "data" / "recon"]:
+            candidates.extend([
+                base / ds / f"lambda_{l_idx}" / img_id,
+                base / ds / f"lambda_{l_idx}" / f"{stem}.png",
+                base / f"{img_id}_lambda{l_idx}.png",
+                base / ds / f"{img_id}_lambda{l_idx}.png",
+            ])
 
         for p in candidates:
             if p.exists():
