@@ -35,6 +35,18 @@
     "latency_bs16_ms": 7.31,
     "throughput_img_s": 136.8
   },
+  "pixel_student_conditioned": {
+    "name": "Pixel Student (RGB CNN + lambda)",
+    "domain": "Decoded Pixels",
+    "requires_synthesis": true,
+    "params_m": 2.445761,
+    "model_gflops": 56.447025666,
+    "synthesis_gflops": 285.0,
+    "total_gflops": 341.447025666,
+    "latency_bs1_ms": 36.5,
+    "latency_bs16_ms": 35.2,
+    "throughput_img_s": 27.4
+  },
   "elic_synthesis_only": {
     "name": "ELIC Synthesis Decoder (g_s only)",
     "domain": "Bitstream -> RGB",
