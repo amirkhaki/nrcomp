@@ -13,6 +13,7 @@ from scripts.eval_pretrained_nr import (
     LOWER_BETTER_METRICS,
     evaluate_split_records,
     format_report_markdown,
+    resolve_orig_path,
     resolve_recon_path,
 )
 
@@ -57,12 +58,32 @@ class TestEvalPretrainedNR(unittest.TestCase):
             res5 = resolve_recon_path(row5, tmp)
             self.assertIsNone(res5)
 
+    def test_resolve_orig_path(self):
+        with TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            orig_target = tmp / "data" / "raw" / "koniq10k" / "1024x768" / "orig123.jpg"
+            orig_target.parent.mkdir(parents=True, exist_ok=True)
+            orig_target.write_text("dummy")
+
+            # Inferred from raw directory
+            row = {"dataset": "koniq", "image_id": "orig123.jpg"}
+            res = resolve_orig_path(row, tmp)
+            self.assertEqual(res, orig_target)
+
+            # Direct path in orig_path
+            row2 = {"orig_path": str(orig_target)}
+            res2 = resolve_orig_path(row2, tmp)
+            self.assertEqual(res2, orig_target)
+
     def test_evaluate_split_records(self):
         records = [
             {
                 "image_id": f"img_{i}",
                 "lambda_idx": i % 3,
                 "aligned_score": float(i) * 0.1,
+                "s_recon": float(i) * 0.1,
+                "s_orig": 0.8,
+                "delta_s": float(i) * 0.1 - 0.8,
                 "target": float(i) * 0.15,
                 "bpp_actual": 0.5,
                 "orig_mos": 50.0 + i,
@@ -78,6 +99,10 @@ class TestEvalPretrainedNR(unittest.TestCase):
         self.assertIn("within_lambda_partial_spearman_bpp", res)
         self.assertIn("per_lambda_partial_spearman_bpp", res)
         self.assertIsNotNone(res["within_lambda_srocc_ci"][0])
+        self.assertIn("delta", res)
+        self.assertIn("orig_stats", res)
+        self.assertEqual(res["orig_stats"]["n_unique_images"], 15)
+        self.assertAlmostEqual(res["orig_stats"]["mean_s_orig"], 0.8)
 
     def test_format_report_markdown(self):
         prov = "> [!NOTE]\n> Provenance test header\n"

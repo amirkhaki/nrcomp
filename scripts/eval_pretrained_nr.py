@@ -89,6 +89,41 @@ def resolve_recon_path(row: Dict[str, Any], project_root: Path) -> Optional[Path
     return None
 
 
+def resolve_orig_path(row: Dict[str, Any], project_root: Path) -> Optional[Path]:
+    """Find the initial uncompressed image file on disk."""
+    raw_p = row.get("orig_path")
+    candidates = []
+    if raw_p:
+        p = Path(raw_p)
+        if p.is_absolute():
+            candidates.append(p)
+        else:
+            candidates.append(project_root / p)
+
+    dataset = str(row.get("dataset", "koniq"))
+    image_id = str(row.get("image_id", ""))
+    stem = Path(image_id).stem
+
+    for base in [
+        project_root / "data" / "raw" / "koniq10k" / "1024x768",
+        project_root / "data" / "raw" / "koniq10k",
+        project_root / "data" / "raw" / "koniq",
+        project_root / "data" / "raw" / "LIVEC" / "Images",
+        project_root / "data" / "raw" / "LIVEC",
+        project_root / "data" / "raw" / "livec",
+        project_root / "data" / "raw" / dataset,
+    ]:
+        candidates.append(base / image_id)
+        candidates.append(base / f"{stem}.jpg")
+        candidates.append(base / f"{stem}.png")
+        candidates.append(base / f"{stem}.bmp")
+
+    for cand in candidates:
+        if cand.exists():
+            return cand
+    return None
+
+
 def init_nr_metric(
     model_name: str, device: Any, backend: str = "pyiqa"
 ) -> Tuple[Callable[[Path], float], bool]:
@@ -241,6 +276,87 @@ def evaluate_split_records(
         except Exception:
             e3_stats = {}
 
+    # Differential metrics: delta_s = (s_recon - s_orig)
+    delta_eval = {}
+    has_delta = any(r.get("delta_s") is not None for r in records)
+    if has_delta:
+        delta_preds = [
+            float(r["delta_s"]) if r.get("delta_s") is not None else float(r["aligned_score"])
+            for r in records
+        ]
+        d_mean_w_srocc, d_per_l_srocc = compute_within_lambda_srocc(delta_preds, targets, lambdas)
+        d_srocc = spearman_rho(delta_preds, targets)
+        d_wl_part_bpp, d_per_l_part = compute_within_lambda_partial_spearman(delta_preds, targets, bpps, lambdas)
+        d_pw = compute_pwrc_within_lambda(delta_preds, targets, lambdas)
+
+        d_ci_w_srocc = (None, None)
+        if n_bootstrap > 0 and len(set(image_ids)) >= 10:
+            for r, dp in zip(records, delta_preds):
+                r["_delta_tmp"] = dp
+            try:
+                d_cis = compute_clustered_bootstrap_cis(
+                    records=records,
+                    raw_pred_key="_delta_tmp",
+                    mapped_pred_key="_delta_tmp",
+                    target_key="target",
+                    n_resamples=n_bootstrap,
+                    seed=seed,
+                    compute_ds_auc_ci=True,
+                )
+                d_ci_w_srocc = d_cis.get("within_lambda_srocc", (None, None))
+            except Exception:
+                d_ci_w_srocc = (None, None)
+
+        d_e3 = {}
+        if len(valid_mos_pairs) >= 10:
+            try:
+                d_e3 = compute_mos_independence(
+                    preds=delta_preds,
+                    targets=targets,
+                    orig_mos_list=mos_list,
+                    lambda_indices=lambdas,
+                    mae_preds=delta_preds,
+                )
+            except Exception:
+                d_e3 = {}
+
+        delta_eval = {
+            "within_lambda_srocc": d_mean_w_srocc,
+            "within_lambda_srocc_ci": list(d_ci_w_srocc),
+            "per_lambda_srocc": {str(k): float(v) for k, v in d_per_l_srocc.items()},
+            "within_lambda_partial_spearman_bpp": d_wl_part_bpp,
+            "srocc": d_srocc,
+            "ds_auc": d_pw.get("ds_auc"),
+            "e3_mos_independence": d_e3,
+        }
+
+    # Initial image statistics (s_orig)
+    orig_stats = {}
+    orig_by_img = {}
+    for r in records:
+        img_id = str(r["image_id"])
+        if img_id not in orig_by_img and r.get("s_orig") is not None:
+            orig_by_img[img_id] = (float(r["s_orig"]), r.get("orig_mos"))
+
+    if orig_by_img:
+        s_orig_vals = [v[0] for v in orig_by_img.values()]
+        mos_pairs = [(v[0], float(v[1])) for v in orig_by_img.values() if v[1] is not None]
+        rho_orig_mos = (
+            spearman_rho([p[0] for p in mos_pairs], [p[1] for p in mos_pairs])
+            if len(mos_pairs) >= 10
+            else None
+        )
+        mean_s_orig = sum(s_orig_vals) / len(s_orig_vals)
+        var_s_orig = (
+            sum((x - mean_s_orig) ** 2 for x in s_orig_vals) / max(len(s_orig_vals) - 1, 1)
+        )
+        orig_stats = {
+            "n_unique_images": len(orig_by_img),
+            "mean_s_orig": mean_s_orig,
+            "std_s_orig": math.sqrt(var_s_orig),
+            "rho_s_orig_mos": rho_orig_mos,
+        }
+
     return {
         "n_samples": len(records),
         "n_images": len(set(image_ids)),
@@ -258,6 +374,8 @@ def evaluate_split_records(
         "ds_auc_ci": list(ci_ds_auc),
         "pwrc": pw,
         "e3_mos_independence": e3_stats,
+        "delta": delta_eval,
+        "orig_stats": orig_stats,
     }
 
 
@@ -285,7 +403,8 @@ def save_run_artifacts(
     if all_recs:
         fieldnames = [
             "image_id", "dataset", "split", "lambda_idx", "lambda_value",
-            "bpp_actual", "y", "raw_score", "s", "mapped_pred", "orig_mos"
+            "bpp_actual", "y", "raw_score_orig", "raw_score_recon",
+            "s_orig", "s_recon", "delta_s", "raw_score", "s", "mapped_pred", "orig_mos"
         ]
         csv_path = run_dir / f"{runs.PREDICTIONS_STEM}.csv"
         with open(csv_path, "w", newline="", encoding="utf-8") as f:
@@ -300,9 +419,14 @@ def save_run_artifacts(
                     "lambda_value": r["lambda_value"],
                     "bpp_actual": r["bpp_actual"],
                     "y": r["target"],
-                    "raw_score": r["raw_score"],
-                    "s": r["aligned_score"],
-                    "mapped_pred": r.get("mapped_pred", r["aligned_score"]),
+                    "raw_score_orig": r.get("raw_score_orig"),
+                    "raw_score_recon": r.get("raw_score_recon", r.get("raw_score")),
+                    "s_orig": r.get("s_orig"),
+                    "s_recon": r.get("s_recon", r.get("aligned_score")),
+                    "delta_s": r.get("delta_s"),
+                    "raw_score": r.get("raw_score"),
+                    "s": r.get("aligned_score"),
+                    "mapped_pred": r.get("mapped_pred", r.get("aligned_score")),
                     "orig_mos": r.get("orig_mos"),
                 }
                 writer.writerow(row_dict)
@@ -373,12 +497,23 @@ def format_report_markdown(
             ci_str = f" [{_fmt(ci[0])}, {_fmt(ci[1])}]" if ci[0] is not None else ""
             align_txt = "-score (lower=better)" if doc.get("lower_better") else "higher=better"
             lines.append(
-                f"| Pretrained {m_name.upper()} | Decoded Pixels | {align_txt} | "
+                f"| Pretrained {m_name.upper()} (recon) | Decoded Pixels | {align_txt} | "
                 f"{_fmt(sp.get('within_lambda_srocc'))}{ci_str} | "
                 f"{_fmt(sp.get('srocc'))} | {_fmt(sp.get('plcc'))} | "
                 f"{_fmt(sp.get('within_lambda_partial_spearman_bpp'))} | "
                 f"{_fmt(sp.get('ds_auc'))} |"
             )
+            delta = sp.get("delta") or {}
+            if delta and delta.get("within_lambda_srocc") is not None:
+                d_ci = delta.get("within_lambda_srocc_ci") or (None, None)
+                d_ci_str = f" [{_fmt(d_ci[0])}, {_fmt(d_ci[1])}]" if d_ci[0] is not None else ""
+                lines.append(
+                    f"| Pretrained {m_name.upper()} (differential Δs) | Differential (x_recon - x_orig) | differential | "
+                    f"{_fmt(delta.get('within_lambda_srocc'))}{d_ci_str} | "
+                    f"{_fmt(delta.get('srocc'))} | n/a | "
+                    f"{_fmt(delta.get('within_lambda_partial_spearman_bpp'))} | "
+                    f"{_fmt(delta.get('ds_auc'))} |"
+                )
         lines.append("")
 
     # E3 Source MOS independence table
@@ -408,7 +543,21 @@ def format_report_markdown(
             part_mos = overall.get("partial_s_mos_given_y") or e3.get("partial_s_mos_given_y") or e3.get("partial_pred_mos_given_y") or e3.get("s_mos_partial_spearman")
             if rho_mos is not None:
                 interp = "Confounded by source aesthetics" if abs(part_mos or 0) > 0.2 else "Moderate content bias"
-                lines.append(f"| Pretrained {m_name.upper()} | {split_title} | {_fmt(rho_mos)} | {_fmt(part_mos)} | {interp} |")
+                lines.append(f"| Pretrained {m_name.upper()} (recon) | {split_title} | {_fmt(rho_mos)} | {_fmt(part_mos)} | {interp} |")
+
+            orig_st = sp.get("orig_stats") or {}
+            rho_orig_mos = orig_st.get("rho_s_orig_mos")
+            if rho_orig_mos is not None:
+                lines.append(f"| Pretrained {m_name.upper()} (initial uncompressed) | {split_title} | {_fmt(rho_orig_mos)} | n/a (uncompressed) | Source aesthetic quality baseline |")
+
+            delta = sp.get("delta") or {}
+            d_e3 = delta.get("e3_mos_independence") or {}
+            d_overall = (d_e3.get("overall") if isinstance(d_e3, dict) else {}) or {}
+            d_rho = d_overall.get("rho_s_mos") or d_e3.get("rho_s_mos")
+            d_part = d_overall.get("partial_s_mos_given_y") or d_e3.get("partial_s_mos_given_y")
+            if d_rho is not None:
+                d_interp = "Confounded by source aesthetics" if abs(d_part or 0) > 0.2 else "Content bias attenuated"
+                lines.append(f"| Pretrained {m_name.upper()} (differential Δs) | {split_title} | {_fmt(d_rho)} | {_fmt(d_part)} | {d_interp} |")
 
     lines.append("")
     return "\n".join(lines)
@@ -587,8 +736,10 @@ def main():
                 n_missing_recon += 1
                 continue
 
+        orig_file = resolve_orig_path(r, PROJECT_ROOT)
         row_item = dict(r)
         row_item["_resolved_recon_path"] = str(recon_file)
+        row_item["_resolved_orig_path"] = str(orig_file) if (orig_file and orig_file.exists()) else None
         row_item["_processed_target"] = prepare_target_value(float(target_raw), args.target_metric)
         row_item["_lambda_val"] = lambda_vals[int(r["lambda_idx"])] if int(r["lambda_idx"]) < len(lambda_vals) else 0.0
         valid_rows_by_split[split_key].append(row_item)
@@ -596,11 +747,14 @@ def main():
     if n_auto_decoded > 0:
         print(f"[DECODE] Auto-decoded {n_auto_decoded} missing reconstructions from quantized latents into data/recons/.")
 
+    n_origs_found = sum(
+        1 for v in valid_rows_by_split.values() for r in v if r.get("_resolved_orig_path")
+    )
     print(
         f"Reconstructions Found: koniq_val={len(valid_rows_by_split['koniq_val'])}, "
         f"koniq_test={len(valid_rows_by_split['koniq_test'])}, "
         f"livec_test={len(valid_rows_by_split['livec_test'])} "
-        f"(missing on disk: {n_missing_recon})"
+        f"(missing on disk: {n_missing_recon}; initial images located: {n_origs_found})"
     )
 
     total_valid = sum(len(v) for v in valid_rows_by_split.values())
@@ -621,6 +775,7 @@ def main():
 
         print(f">>> Running inference for {m_name.upper()} (lower_better={is_lower_better})...")
         records_by_split: Dict[str, List[Dict[str, Any]]] = {}
+        orig_cache: Dict[str, Optional[float]] = {}
         t0 = time.time()
 
         for split_key in ["koniq_val", "koniq_test", "livec_test"]:
@@ -633,17 +788,30 @@ def main():
                 rows = rows[:args.limit]
 
             recs = []
-            print(f"  [{split_key}] Evaluating {len(rows)} images...", end="", flush=True)
+            print(f"  [{split_key}] Evaluating {len(rows)} images (initial + compressed)...", end="", flush=True)
             sp_t0 = time.time()
             for r in rows:
                 img_p = Path(r["_resolved_recon_path"])
                 try:
-                    raw_score = eval_fn(img_p)
+                    raw_recon = eval_fn(img_p)
                 except Exception as err:
-                    print(f"\n[WARN] Failed scoring {img_p}: {err}")
+                    print(f"\n[WARN] Failed scoring recon {img_p}: {err}")
                     continue
 
-                aligned_score = -raw_score if is_lower_better else raw_score
+                raw_orig = None
+                orig_p_str = r.get("_resolved_orig_path")
+                if orig_p_str:
+                    if orig_p_str not in orig_cache:
+                        try:
+                            orig_cache[orig_p_str] = float(eval_fn(Path(orig_p_str)))
+                        except Exception:
+                            orig_cache[orig_p_str] = None
+                    raw_orig = orig_cache.get(orig_p_str)
+
+                s_recon = -raw_recon if is_lower_better else raw_recon
+                s_orig = (-raw_orig if is_lower_better else raw_orig) if raw_orig is not None else None
+                delta_s = (s_recon - s_orig) if (s_orig is not None) else None
+
                 recs.append({
                     "image_id": str(r["image_id"]),
                     "dataset": str(r["dataset"]),
@@ -652,8 +820,14 @@ def main():
                     "lambda_value": float(r["_lambda_val"]),
                     "bpp_actual": float(r.get("bpp_actual", 0.0)),
                     "target": float(r["_processed_target"]),
-                    "raw_score": float(raw_score),
-                    "aligned_score": float(aligned_score),
+                    "raw_score_recon": float(raw_recon),
+                    "raw_score_orig": float(raw_orig) if raw_orig is not None else None,
+                    "s_recon": float(s_recon),
+                    "s_orig": float(s_orig) if s_orig is not None else None,
+                    "delta_s": float(delta_s) if delta_s is not None else None,
+                    "raw_score": float(raw_recon),
+                    "aligned_score": float(s_recon),
+                    "s": float(s_recon),
                     "orig_mos": None if is_missing(r.get("orig_mos")) else float(r["orig_mos"]),
                 })
             sp_elapsed = time.time() - sp_t0
