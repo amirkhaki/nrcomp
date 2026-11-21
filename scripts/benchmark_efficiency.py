@@ -476,14 +476,53 @@ def run_live_gpu_benchmarking(
             from PIL import Image
             import tempfile
 
-            dummy_rgb = torch.zeros((1, 3, h_orig, w_orig), device=device)
             elic_decode_ms = data.get("elic_synthesis_only", {}).get("latency_bs1_ms", 0.0)
             elic_decode_flops = data.get("elic_synthesis_only", {}).get("model_gflops", 0.0)
 
-            # Create a reusable temporary image file in case a metric requires a file path
+            # Create a realistic benchmark image with natural texture (crucial for NIQE/BRISQUE statistical NSS fitting)
             tmp_img = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
             tmp_img_p = Path(tmp_img.name)
-            Image.new("RGB", (w_orig, h_orig), color=(128, 128, 128)).save(tmp_img_p)
+
+            benchmark_pil = None
+            img_candidates = [
+                PROJECT_ROOT / "third_party" / "ELiC-ReImplemetation" / "Kodak.png",
+            ]
+            if (PROJECT_ROOT / "data" / "recons").exists():
+                img_candidates.extend(list((PROJECT_ROOT / "data" / "recons").glob("**/*.png"))[:3])
+            if (PROJECT_ROOT / "data" / "recon").exists():
+                img_candidates.extend(list((PROJECT_ROOT / "data" / "recon").glob("**/*.png"))[:3])
+
+            for cand in img_candidates:
+                if cand.exists():
+                    try:
+                        with Image.open(cand) as im:
+                            benchmark_pil = im.convert("RGB").resize((w_orig, h_orig))
+                            break
+                    except Exception:
+                        pass
+
+            if benchmark_pil is None:
+                # Generate synthetic natural-like textured image with gradient and variations
+                import random
+                rng = random.Random(42)
+                benchmark_pil = Image.new("RGB", (w_orig, h_orig))
+                pix = benchmark_pil.load()
+                for y in range(h_orig):
+                    for x in range(w_orig):
+                        r_val = int((x / w_orig) * 180 + rng.randint(0, 75))
+                        g_val = int((y / h_orig) * 180 + rng.randint(0, 75))
+                        b_val = int(((x + y) / (w_orig + h_orig)) * 180 + rng.randint(0, 75))
+                        pix[x, y] = (min(255, r_val), min(255, g_val), min(255, b_val))
+
+            benchmark_pil.save(tmp_img_p)
+
+            # Convert to float tensor [1, 3, H, W] in [0, 1]
+            try:
+                import numpy as np
+                arr = np.asarray(benchmark_pil, dtype=np.float32) / 255.0
+                dummy_rgb = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0).to(device)
+            except Exception:
+                dummy_rgb = torch.rand((1, 3, h_orig, w_orig), device=device)
 
             for m_name in target_nr_models:
                 m_lower = m_name.lower().strip()
@@ -506,22 +545,22 @@ def run_live_gpu_benchmarking(
                     try:
                         with torch.no_grad():
                             res = metric(dummy_rgb)
-                            if isinstance(res, torch.Tensor) and torch.isnan(res).any():
+                            if (isinstance(res, torch.Tensor) and torch.isnan(res).any()) or (isinstance(res, float) and math.isnan(res)):
                                 use_tensor = False
                     except Exception:
                         use_tensor = False
 
-                    if use_tensor:
-                        def _forward_call():
-                            with torch.no_grad():
-                                return metric(dummy_rgb)
-                    else:
-                        def _forward_call():
-                            with torch.no_grad():
-                                return metric(str(tmp_img_p))
+                    def _safe_forward():
+                        with torch.no_grad():
+                            if use_tensor:
+                                try:
+                                    return metric(dummy_rgb)
+                                except Exception:
+                                    pass
+                            return metric(str(tmp_img_p))
 
                     # FLOPs and GMACs profiling
-                    gmacs, gflops, flop_src = measure_torch_flops_and_macs(_forward_call)
+                    gmacs, gflops, flop_src = measure_torch_flops_and_macs(_safe_forward)
                     if gflops is None:
                         if params_count == 0:
                             flop_src = "Classical algorithm (non-neural)"
@@ -531,7 +570,7 @@ def run_live_gpu_benchmarking(
                     # Measure latency
                     p_warmup = 1 if quick else 2
                     p_iters = 3 if quick else 5
-                    fwd_lat_ms = profile_torch_fn_latency(_forward_call, warmup_runs=p_warmup, test_runs=p_iters)
+                    fwd_lat_ms = profile_torch_fn_latency(_safe_forward, warmup_runs=p_warmup, test_runs=p_iters)
                     tot_lat_ms = elic_decode_ms + fwd_lat_ms if elic_decode_ms else fwd_lat_ms
                     th_img = 1000.0 / tot_lat_ms if tot_lat_ms > 0 else 0.0
                     tot_flops = round(gflops + elic_decode_flops, 2) if (gflops is not None and elic_decode_flops is not None) else None
@@ -667,12 +706,17 @@ def format_efficiency_report(
     lines.append(
         f"3. **Parameter Footprint:** Latent Student Conditioned A has **{cond_a.get('params_m', 4.3):.2f}M parameters**."
     )
-    for m in ["clipiqa", "musiq", "maniqa"]:
+    for m in ["clipiqa", "musiq", "maniqa", "niqe", "brisque"]:
         pm = data.get(f"pretrained_{m}")
         if pm and pm.get("model_gflops") and flops_a:
             lines.append(
                 f"- **vs Pretrained {m.upper()}:** Standalone model forward requires **{pm['model_gflops']:.2f} GFLOPs** "
                 f"({pm.get('total_gflops', 0):.2f} GFLOPs end-to-end with decode), vs **{flops_a:.2f} GFLOPs** for Latent Student."
+            )
+        elif pm and pm.get("latency_bs1_ms") and lat_a:
+            lines.append(
+                f"- **vs Pretrained {m.upper()}:** End-to-end pipeline requires **{pm['latency_bs1_ms']:.2f} ms** "
+                f"({pm.get('throughput_img_s', 0):.1f} img/s), vs **{lat_a:.2f} ms** ({cond_a.get('throughput_img_s', 0):.1f} img/s) for Latent Student."
             )
     lines.append("")
     return "\n".join(lines)
